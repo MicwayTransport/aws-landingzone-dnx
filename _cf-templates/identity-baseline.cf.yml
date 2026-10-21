@@ -1,0 +1,197 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Infrastructure IAM Service Roles (rev:citadel3)"
+
+Parameters:
+  SAMLProviderArn:
+    Description: ARN of SAML Provider to use. This creates IAM roles 'InfraDeploy' and 'BillingAccess'.
+    Type: String
+    Default: ""
+  SAMLProviderDocument:
+    Description: SAML Provider XML Document. Use when XML is < 4096 characters. This creates the SAML Provider and IAM roles 'InfraDeploy' and 'BillingAccess'.
+    Type: String
+    Default: ""
+  TrustArns:
+    Description: List of comma-separated ARNs or AWS Account IDs that can assume InfraDeployAccess (usually InfraDeploy role or user from a central account) - optional
+    Type: String
+    Default: ""
+  DNX:
+    Description: Allows DNX access to this account
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+  DNXAutomation:
+    Description: Allows DNX Automation access to this account
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+  CreateInfraDeployUser:
+    Description: Creates an IAM User for InfraDeploy, in addition to the IAM Role
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+  OrgName:
+    Description: Name of your organization for the purpose of using in resource naming
+    Type: String
+    MinLength: 1
+    MaxLength: 14
+    AllowedPattern: ^[a-zA-Z0-9]*$
+
+Conditions:
+  isSSO: !Not [!And [ !Equals [!Ref SAMLProviderDocument, ""], !Equals [!Ref SAMLProviderArn, ""] ] ]
+  isCreateIdentityProvider: !Not [!Equals [!Ref SAMLProviderDocument, ""] ]
+  isDNX: !Equals [!Ref DNX, "true"]
+  isDNXAutomation: !Equals [!Ref DNXAutomation, "true"]
+  isTrustArns: !Not [ !Equals [!Ref TrustArns, ""] ]
+  isCreateInfraDeployUser: !Equals [!Ref CreateInfraDeployUser, "true"]
+
+Resources:
+  IAMRoleDNXAccess:
+    Condition: isDNX
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${OrgName}DNXAccess"
+      MaxSessionDuration: 43200
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              AWS: "148642451802"
+            Action: "sts:AssumeRole"
+
+  IAMIdentityProvider:
+    Condition: isCreateIdentityProvider
+    Type: AWS::IAM::SAMLProvider
+    Properties:
+      Name: !Sub "${OrgName}-sso"
+      SamlMetadataDocument: !Ref SAMLProviderDocument
+
+  IAMUserInfraDeploy:
+    Condition: isCreateInfraDeployUser
+    Type: "AWS::IAM::User"
+    Properties:
+      UserName: InfraDeploy
+
+  IAMRoleInfraDeploy:
+    Condition: isSSO
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "InfraDeploy"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [isCreateIdentityProvider, !Ref IAMIdentityProvider, !Ref SAMLProviderArn]
+            Action: 'sts:AssumeRoleWithSAML'
+            Condition:
+              StringEquals:
+                'saml:aud': 'https://signin.aws.amazon.com/saml'
+
+  IAMRoleInfraDeployEc2:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "InfraDeployEc2"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: "ec2.amazonaws.com"
+            Action: 'sts:AssumeRole'
+
+  IAMInstanceProfileInfraDeploy:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      InstanceProfileName: "InfraDeployInstanceProfile"
+      Roles:
+        - !Ref "IAMRoleInfraDeployEc2"
+
+  IAMRoleInfraDeployAccess:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "InfraDeployAccess"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Split
+                - ","
+                - !Join
+                  - ","
+                  - - !Join
+                      - ","
+                      - - !If [ isCreateInfraDeployUser, !GetAtt IAMUserInfraDeploy.Arn, !Ref "AWS::NoValue" ]
+                        - !GetAtt IAMRoleInfraDeployEc2.Arn
+                        - !If [ isSSO, !GetAtt "IAMRoleInfraDeploy.Arn", !Ref "AWS::NoValue" ]
+                        - !If [ isDNX, "148642451802", !Ref "AWS::NoValue" ]
+                        - !If [ isDNXAutomation, "arn:aws:iam::953027019050:role/InfraDeploy", !Ref "AWS::NoValue" ]
+                    - !If [ isTrustArns, !Ref "TrustArns", !Ref "AWS::NoValue" ]
+            Action: 'sts:AssumeRole'
+
+  IAMPolicyAdmin:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "admin"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action: "*"
+            Resource: "*"
+      Roles:
+        - !Ref "IAMRoleInfraDeployAccess"
+        - !If [ isDNX, !Ref "IAMRoleDNXAccess", !Ref "AWS::NoValue" ]
+
+  IAMPolicyInfraDeployAssume:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "infra-deploy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action: "sts:AssumeRole"
+            Resource:
+              - "arn:aws:iam::*:role/TerraformBackendAccess"
+              - "arn:aws:iam::*:role/CIDeployAccess"
+              - "arn:aws:iam::*:role/InfraDeployAccess"
+          - Effect: "Allow"
+            Action:
+              - "organizations:Describe*"
+              - "organizations:List*"
+              - "sts:Get*"
+            Resource: "*"
+      Users:
+        - !If [ isCreateInfraDeployUser, !Ref IAMUserInfraDeploy, !Ref "AWS::NoValue" ]
+      Roles:
+        - !Ref IAMRoleInfraDeployEc2
+        - !If [ isSSO, !Ref "IAMRoleInfraDeploy", !Ref "AWS::NoValue" ]
+
+
+Outputs:
+  IAMRoleInfraDeployArn:
+    Description: InfraDeploy IAM Role ARN (to use for SSO)
+    Value: !GetAtt IAMRoleInfraDeploy.Arn
+    Condition: isSSO
+  IAMRoleInfraDeployEc2Arn:
+    Description: InfraDeployEc2 IAM Role ARN (to use with EC2 CI workers)
+    Value: !GetAtt IAMRoleInfraDeployEc2.Arn
+  IAMInstanceProfileInfraDeployArn:
+    Description: InfraDeployEc2 IAM Instance Profile ARN (to use with EC2 CI workers)
+    Value: !GetAtt IAMInstanceProfileInfraDeploy.Arn
+  IAMRoleInfraDeployAccessArn:
+    Description: InfraDeployAccess IAM Role ARN
+    Value: !GetAtt IAMRoleInfraDeployAccess.Arn
+  IAMIdentityProviderArn:
+    Description: IdentityProvider ARN
+    Value: !If [isCreateIdentityProvider, !Ref IAMIdentityProvider, !Ref SAMLProviderArn]
+    Condition: isSSO

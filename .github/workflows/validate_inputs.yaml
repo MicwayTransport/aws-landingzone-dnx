@@ -1,0 +1,127 @@
+# Reusable workflow for validating account/stack combinations
+# This workflow validates that the requested account and stack combination
+# is valid according to the defined validation matrix.
+#
+
+
+name: Validate Inputs
+
+on:
+  workflow_call:
+    inputs:
+      account:
+        description: 'Target AWS account name'
+        required: true
+        type: string
+      stack:
+        description: 'Infrastructure stack to deploy'
+        required: true
+        type: string
+    outputs:
+      valid:
+        description: 'Whether the account/stack combination is valid'
+        value: ${{ jobs.validate.outputs.valid }}
+      error_message:
+        description: 'Error message if validation fails'
+        value: ${{ jobs.validate.outputs.error_message }}
+
+jobs:
+  validate:
+    name: Validate Account/Stack Combination
+    runs-on: ubuntu-latest
+    outputs:
+      valid: ${{ steps.validate.outputs.valid }}
+      error_message: ${{ steps.validate.outputs.error_message }}
+    
+    steps:
+      - name: Validate inputs
+        id: validate
+        shell: bash
+        run: |
+          # Define the validation matrix
+          # Each account maps to an array of valid stacks
+          declare -A VALIDATION_MATRIX
+          
+          # Core accounts with limited stacks
+          VALIDATION_MATRIX["audit"]="identity security"
+          VALIDATION_MATRIX["backup"]="backup identity security"
+          VALIDATION_MATRIX["log-archive"]="identity logs security"
+          VALIDATION_MATRIX["shared-services"]="dns-delegation identity network security"
+          
+          # Workload accounts with full stack support
+          VALIDATION_MATRIX["dev"]="backup identity network platform platform-data security"
+          VALIDATION_MATRIX["qa"]="backup identity network platform platform-data security"
+          VALIDATION_MATRIX["stage"]="backup identity network platform platform-data security"
+          VALIDATION_MATRIX["prod"]="backup identity network platform platform-data security"
+          VALIDATION_MATRIX["demo"]="backup identity network platform platform-data security"
+          
+          ACCOUNT="${{ inputs.account }}"
+          STACK="${{ inputs.stack }}"
+          
+          echo "Validating account: $ACCOUNT, stack: $STACK"
+          
+          # Check if account exists in the matrix
+          if [[ -z "${VALIDATION_MATRIX[$ACCOUNT]+isset}" ]]; then
+            echo "valid=false" >> $GITHUB_OUTPUT
+            echo "error_message=Unknown account: '$ACCOUNT'. Valid accounts are: audit, backup, log-archive, shared-services, dev, qa, stage, prod, demo" >> $GITHUB_OUTPUT
+            echo "::error::Unknown account: '$ACCOUNT'"
+            exit 0
+          fi
+          
+          # Get valid stacks for this account
+          VALID_STACKS="${VALIDATION_MATRIX[$ACCOUNT]}"
+          
+          # Check if stack is valid for this account
+          STACK_VALID=false
+          for valid_stack in $VALID_STACKS; do
+            if [[ "$valid_stack" == "$STACK" ]]; then
+              STACK_VALID=true
+              break
+            fi
+          done
+          
+          if [[ "$STACK_VALID" == "true" ]]; then
+            echo "valid=true" >> $GITHUB_OUTPUT
+            echo "error_message=" >> $GITHUB_OUTPUT
+            echo "✅ Validation passed: $ACCOUNT/$STACK is a valid combination"
+          else
+            echo "valid=false" >> $GITHUB_OUTPUT
+            echo "error_message=Invalid combination: '$ACCOUNT/$STACK' is not allowed. Valid stacks for '$ACCOUNT' are: $VALID_STACKS" >> $GITHUB_OUTPUT
+            echo "::error::Invalid combination: '$ACCOUNT/$STACK' is not allowed. Valid stacks for '$ACCOUNT' are: $VALID_STACKS"
+          fi
+
+      - name: Write validation summary
+        if: always()
+        run: |
+          ACCOUNT="${{ inputs.account }}"
+          STACK="${{ inputs.stack }}"
+          VALID="${{ steps.validate.outputs.valid }}"
+          ERROR_MSG="${{ steps.validate.outputs.error_message }}"
+          
+          if [[ "$VALID" == "true" ]]; then
+            STATUS_ICON="✅"
+            STATUS_TEXT="Valid"
+          else
+            STATUS_ICON="❌"
+            STATUS_TEXT="Invalid"
+          fi
+          
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## $STATUS_ICON Input Validation
+          
+          | Property | Value |
+          |----------|-------|
+          | Account | \`$ACCOUNT\` |
+          | Stack | \`$STACK\` |
+          | Status | $STATUS_TEXT |
+          EOF
+          
+          if [[ -n "$ERROR_MSG" ]]; then
+            cat >> $GITHUB_STEP_SUMMARY << EOF
+          
+          ### Error Details
+          \`\`\`
+          $ERROR_MSG
+          \`\`\`
+          EOF
+          fi

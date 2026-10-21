@@ -1,0 +1,256 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Infrastructure Cloudtrail Service Roles (rev:citadel3)"
+
+#====================================================================================================
+Parameters:
+#====================================================================================================
+  AuditAccountID:
+    Description: This is the audit account ID
+    Type: String
+    Default: ""
+
+  OrgName:
+    Description: Name of your organization for the purpose of using in resource naming
+    Type: String
+    MinLength: 1
+    MaxLength: 14
+    AllowedPattern: ^[a-zA-Z0-9]*$
+
+  # parameters of Cloudtrail
+  ExecuteCloudTrail:
+    Description: Executes the Cloudtrail
+    Type: String
+    Default: "false"
+    AllowedValues:
+    - "true"
+    - "false"
+
+  MultiRegionTrail:
+    Description: Creates the Cloudtrail in all Region
+    Type: String
+    Default: false
+    AllowedValues:
+    - true
+    - false
+
+  # Parameters Alarms
+  Email:
+    Type: String
+    Description: Email address to notify when an API activity has triggered an alarm
+
+  ExecuteCloudTrailAlarms:
+    Description: Executes the Cloudtrail Alarms
+    Type: String
+    Default: "false"
+    AllowedValues:
+    - "true"
+    - "false"
+
+  # Parameters Security Hub
+  ExecuteSecurityHub:
+    Description: Executes the SecurityHub
+    Type: String
+    Default: "false"
+    AllowedValues:
+    - "true"
+    - "false"
+
+#====================================================================================================
+Resources:
+#====================================================================================================
+  
+  #1. Here it will create the ROLE for CloudTrail Watch LOG
+  IamRoleForCwLogsCloudTrail:
+    Condition: isExecuteCloudTrail
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ""
+            Effect: "Allow"
+            Principal:
+              Service: "cloudtrail.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: "allow-access-to-cw-logs"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "*"
+
+  #2. Here it will create the CloudWatch
+  CloudWatch:
+    Condition: isExecuteCloudTrail
+    Type: "AWS::Logs::LogGroup"
+    Properties: 
+      LogGroupName: !Sub "${OrgName}-aws-cloudwatch-logs-${AWS::Region}"
+
+  #3. Here it will create the Cloudtrail
+  CloudTrail:
+    Condition: isExecuteCloudTrail
+    Type: "AWS::CloudTrail::Trail"
+    Properties:
+      TrailName: !Sub "${OrgName}-aws-trail"
+      IsLogging: true
+      EnableLogFileValidation: true
+      EventSelectors:
+        - IncludeManagementEvents: true
+          ReadWriteType: "All"
+      IsMultiRegionTrail: !Sub "${MultiRegionTrail}"
+      IncludeGlobalServiceEvents: !Sub "${MultiRegionTrail}"
+      S3BucketName: !Sub "${OrgName}-audit-cloudtrail-${AWS::Region}"
+      CloudWatchLogsLogGroupArn:
+        Fn::GetAtt:
+          - "CloudWatch"
+          - "Arn"
+      CloudWatchLogsRoleArn:
+        Fn::GetAtt:
+          - "IamRoleForCwLogsCloudTrail"
+          - "Arn"
+    DependsOn: 
+        - "CloudWatch"
+        - "IamRoleForCwLogsCloudTrail"
+
+  # Condition
+  WaitHandle: 
+    Type: "AWS::CloudFormation::WaitConditionHandle"
+
+  WaitCondition: 
+    Type: "AWS::CloudFormation::WaitCondition"
+    Properties: 
+      Handle: !If [isExecuteCloudTrail, !Ref AlbWaitHandle, !Ref WaitHandle]
+      Timeout: "1"
+      Count: 0
+
+  AlbWaitHandle: 
+    Condition: isExecuteCloudTrail
+    DependsOn: CloudTrail
+    Type: "AWS::CloudFormation::WaitConditionHandle"
+
+  #4.1. Here it will Create the Alarms
+  AlarmNotificationTopic:
+    Condition: isExecuteCloudTrailAlarms
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      Subscription:
+        - Endpoint: !Ref Email
+          Protocol: email
+    DependsOn: WaitCondition
+
+  #4.2. Here it will Create the Metric Filter
+  RootAccountUsageMetricFilter:
+    Condition: isExecuteCloudTrailAlarms
+    Type: 'AWS::Logs::MetricFilter'
+    Properties:
+      LogGroupName: !Sub "${OrgName}-aws-cloudwatch-logs-${AWS::Region}"
+      # LogGroupName: !If [isExecuteCloudTrail, !Sub "${OrgName}-aws-cloudwatch-logs-${AWS::Region}", !Sub "${OrgName}"]
+      FilterPattern: '{$.userIdentity.type="Root" && $.userIdentity.invokedBy NOT EXISTS && $.eventType !="AwsServiceEvent"}'
+      MetricTransformations:
+        - MetricNamespace: CloudTrailMetrics
+          MetricName: RootAccountUsageEventCount
+          MetricValue: '1'
+    DependsOn: WaitCondition
+
+  #4.3. Here it will Create the Alarms
+  RootAccountUsageAlarm:
+    Condition: isExecuteCloudTrailAlarms
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmName: RootAccountUsage
+      AlarmDescription: (CIS-3.3) Alarms when Root Account is used
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      MetricName: RootAccountUsageEventCount
+      Namespace: CloudTrailMetrics
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Sum
+      Threshold: 1
+      TreatMissingData: notBreaching
+    DependsOn: WaitCondition
+
+  #4.4. Here it will Create the Metric Filter
+  NoMFALoginUsageMetricFilter:
+    Condition: isExecuteCloudTrailAlarms
+    Type: 'AWS::Logs::MetricFilter'
+    Properties:
+      LogGroupName: !Sub "${OrgName}-aws-cloudwatch-logs-${AWS::Region}"
+      # LogGroupName: !If [isExecuteCloudTrail, !Sub "${OrgName}-aws-cloudwatch-logs-${AWS::Region}", !Sub "${OrgName}"]
+      FilterPattern: '{ ($.eventName ="ConsoleLogin") && ($.additionalEventData.MFAUsed != "Yes") }'
+      MetricTransformations:
+        - MetricNamespace: CloudTrailMetrics
+          MetricName: NoMFALoginEventCount
+          MetricValue: '1'
+    DependsOn: WaitCondition
+
+  #4.5. Here it will Create the Alarms
+  NoMFALoginUsageAlarm:
+    Condition: isExecuteCloudTrailAlarms
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmName: NoMFALogin
+      AlarmDescription: Monitoring for single-factor console logins will increase visibility into accounts that are not protected by MFA.
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      MetricName: NoMFALoginEventCount
+      Namespace: CloudTrailMetrics
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Sum
+      Threshold: 1
+      TreatMissingData: notBreaching
+    DependsOn: WaitCondition
+
+  #5. Here it will create the Security Hub
+  SecurityHub:
+    Condition: isExecuteSecurityHub
+    Type: 'AWS::SecurityHub::Hub'
+    Properties: {}
+
+#====================================================================================================
+Conditions:
+#====================================================================================================
+  isExecuteCloudTrail: !Equals [!Ref ExecuteCloudTrail, "true"]
+  isExecuteCloudTrailAlarms: !Equals [!Ref ExecuteCloudTrailAlarms, "true"]
+  isExecuteSecurityHub: !Equals [!Ref ExecuteSecurityHub, "true"]
+  
+
+#====================================================================================================
+Metadata:
+#====================================================================================================
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: "REQUIRED"
+        Parameters:
+          - AuditAccountID
+          - OrgName
+          - DBPassword
+          - DBRootPassword
+      -
+        Label:
+          default: "CLOUDTRAIL"
+        Parameters:
+          - ExecuteCloudTrail
+          - MultiRegionTrail
+
+      -
+        Label:
+          default: "CLOUDTRAIL ALARMS"
+        Parameters:
+          - Email
+          - ExecuteCloudTrailAlarms
+
+      -
+        Label:
+          default: "SECURITY HUB"
+        Parameters:
+          - ExecuteSecurityHub

@@ -1,0 +1,13 @@
+.terraform
+.terraform.lock.hcl
+.terraform-plan*
+.env
+.env.assume
+.env.auth
+.one
+output.json
+terraform-aws-*
+generated/*
+.clients
+extras-*.tf
+*.vscode*

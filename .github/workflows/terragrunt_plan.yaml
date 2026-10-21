@@ -1,0 +1,278 @@
+# Reusable workflow for executing Terragrunt plan operations
+# This workflow runs terragrunt plan in the specified workspace and outputs
+# the plan results including resource change counts.
+#
+
+name: Terragrunt Plan
+
+on:
+  workflow_call:
+    inputs:
+      account:
+        description: 'Target AWS account name'
+        required: true
+        type: string
+      account_id:
+        description: 'AWS account ID'
+        required: true
+        type: string
+      stack:
+        description: 'Infrastructure stack to deploy'
+        required: true
+        type: string
+      region:
+        description: 'AWS region'
+        required: true
+        type: string
+      runner:
+        description: 'GitHub runner to use'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+    outputs:
+      plan_exitcode:
+        description: 'Terraform plan exit code (0=no changes, 2=changes)'
+        value: ${{ jobs.plan.outputs.plan_exitcode }}
+      has_changes:
+        description: 'Whether the plan has changes'
+        value: ${{ jobs.plan.outputs.has_changes }}
+      add_count:
+        description: 'Number of resources to add'
+        value: ${{ jobs.plan.outputs.add_count }}
+      change_count:
+        description: 'Number of resources to change'
+        value: ${{ jobs.plan.outputs.change_count }}
+      destroy_count:
+        description: 'Number of resources to destroy'
+        value: ${{ jobs.plan.outputs.destroy_count }}
+
+env:
+  AWS_REGION: ${{ inputs.region }}
+  TF_INPUT: 'false'
+  TF_IN_AUTOMATION: 'true'
+
+jobs:
+  plan:
+    name: Terragrunt Plan
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      plan_exitcode: ${{ steps.plan.outputs.exitcode }}
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+      add_count: ${{ steps.plan.outputs.add_count }}
+      change_count: ${{ steps.plan.outputs.change_count }}
+      destroy_count: ${{ steps.plan.outputs.destroy_count }}
+    
+    permissions:
+      id-token: write
+      contents: read
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Terraform & Terragrunt
+        run: |
+          # Install Terraform
+          TERRAFORM_VERSION="1.14.4"
+          wget -qO /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+          unzip -q /tmp/terraform.zip -d /tmp/
+          sudo mv /tmp/terraform /usr/local/bin/
+          sudo chmod +x /usr/local/bin/terraform
+          
+          # Install Terragrunt
+          TERRAGRUNT_VERSION="0.55.0"
+          wget -qO /tmp/terragrunt "https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}/terragrunt_linux_amd64"
+          sudo mv /tmp/terragrunt /usr/local/bin/terragrunt
+          sudo chmod +x /usr/local/bin/terragrunt
+          
+          terraform --version
+          terragrunt --version
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ inputs.account_id }}:role/InfraDeployGitHub
+          role-session-name: github-actions-terragrunt-plan
+          aws-region: ${{ inputs.region }}
+
+      - name: Setup Terraform provider cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.terraform.d/plugin-cache
+            .terragrunt-cache
+          key: ${{ runner.os }}-terraform-${{ inputs.account }}-${{ inputs.stack }}-${{ hashFiles('**/*.tf', '**/*.hcl') }}
+          restore-keys: |
+            ${{ runner.os }}-terraform-${{ inputs.account }}-${{ inputs.stack }}-
+            ${{ runner.os }}-terraform-${{ inputs.account }}-
+            ${{ runner.os }}-terraform-
+
+      - name: Configure Terraform plugin cache
+        run: |
+          mkdir -p ~/.terraform.d/plugin-cache
+          echo 'plugin_cache_dir = "$HOME/.terraform.d/plugin-cache"' > ~/.terraformrc
+
+      - name: Construct workspace path
+        id: workspace
+        run: |
+          WORKSPACE_PATH="_workspaces/${{ inputs.account }}/${{ inputs.region }}/${{ inputs.stack }}"
+          echo "path=$WORKSPACE_PATH" >> $GITHUB_OUTPUT
+          echo "📁 Workspace path: $WORKSPACE_PATH"
+          
+          # Verify workspace exists
+          if [[ ! -d "$WORKSPACE_PATH" ]]; then
+            echo "::error::Workspace directory not found: $WORKSPACE_PATH"
+            exit 1
+          fi
+
+      - name: Terragrunt init
+        id: init
+        shell: bash
+        working-directory: ${{ steps.workspace.outputs.path }}
+        run: |
+          echo "🔧 Initializing Terragrunt..."
+          terragrunt init \
+            --terragrunt-iam-role "arn:aws:iam::${{ inputs.account_id }}:role/InfraDeployAccess" \
+            --terragrunt-non-interactive \
+            -no-color 2>&1 | tee init_output.txt
+          
+          INIT_EXIT_CODE=${PIPESTATUS[0]}
+          if [[ $INIT_EXIT_CODE -ne 0 ]]; then
+            echo "::error::Terragrunt init failed with exit code $INIT_EXIT_CODE"
+            exit $INIT_EXIT_CODE
+          fi
+          echo "✅ Terragrunt init completed successfully"
+
+      - name: Terragrunt plan
+        id: plan
+        shell: bash
+        working-directory: ${{ steps.workspace.outputs.path }}
+        run: |
+          echo "📋 Running Terragrunt plan..."
+          
+          # Run plan and capture output
+          set +e
+          terragrunt plan \
+            --terragrunt-iam-role "arn:aws:iam::${{ inputs.account_id }}:role/InfraDeployAccess" \
+            --terragrunt-non-interactive \
+            -detailed-exitcode \
+            -out=tfplan \
+            -no-color 2>&1 | tee plan_output.txt
+          
+          PLAN_EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          
+          echo "exitcode=$PLAN_EXIT_CODE" >> $GITHUB_OUTPUT
+          
+          # Interpret exit code
+          # 0 = No changes
+          # 1 = Error
+          # 2 = Changes present
+          case $PLAN_EXIT_CODE in
+            0)
+              echo "has_changes=false" >> $GITHUB_OUTPUT
+              echo "✅ No changes detected"
+              ;;
+            1)
+              echo "has_changes=false" >> $GITHUB_OUTPUT
+              echo "::error::Terragrunt plan failed"
+              exit 1
+              ;;
+            2)
+              echo "has_changes=true" >> $GITHUB_OUTPUT
+              echo "📝 Changes detected"
+              ;;
+          esac
+          
+          # Parse resource counts from plan output
+          ADD_COUNT=$(grep -oP '(\d+) to add' plan_output.txt | grep -oP '\d+' || echo "0")
+          CHANGE_COUNT=$(grep -oP '(\d+) to change' plan_output.txt | grep -oP '\d+' || echo "0")
+          DESTROY_COUNT=$(grep -oP '(\d+) to destroy' plan_output.txt | grep -oP '\d+' || echo "0")
+          
+          echo "add_count=${ADD_COUNT:-0}" >> $GITHUB_OUTPUT
+          echo "change_count=${CHANGE_COUNT:-0}" >> $GITHUB_OUTPUT
+          echo "destroy_count=${DESTROY_COUNT:-0}" >> $GITHUB_OUTPUT
+          
+          echo ""
+          echo "📊 Resource Changes Summary:"
+          echo "   ➕ Add: ${ADD_COUNT:-0}"
+          echo "   🔄 Change: ${CHANGE_COUNT:-0}"
+          echo "   ➖ Destroy: ${DESTROY_COUNT:-0}"
+
+      - name: Write plan summary
+        if: always()
+        run: |
+          ACCOUNT="${{ inputs.account }}"
+          STACK="${{ inputs.stack }}"
+          REGION="${{ inputs.region }}"
+          WORKSPACE_PATH="${{ steps.workspace.outputs.path }}"
+          PLAN_EXITCODE="${{ steps.plan.outputs.exitcode }}"
+          HAS_CHANGES="${{ steps.plan.outputs.has_changes }}"
+          ADD_COUNT="${{ steps.plan.outputs.add_count }}"
+          CHANGE_COUNT="${{ steps.plan.outputs.change_count }}"
+          DESTROY_COUNT="${{ steps.plan.outputs.destroy_count }}"
+          
+          # Determine status
+          case "$PLAN_EXITCODE" in
+            0)
+              STATUS_ICON="✅"
+              STATUS_TEXT="No Changes"
+              ;;
+            1)
+              STATUS_ICON="❌"
+              STATUS_TEXT="Failed"
+              ;;
+            2)
+              STATUS_ICON="📝"
+              STATUS_TEXT="Changes Detected"
+              ;;
+            *)
+              STATUS_ICON="⚠️"
+              STATUS_TEXT="Unknown"
+              ;;
+          esac
+          
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## $STATUS_ICON Terragrunt Plan Summary
+          
+          | Property | Value |
+          |----------|-------|
+          | Account | \`$ACCOUNT\` |
+          | Stack | \`$STACK\` |
+          | Region | \`$REGION\` |
+          | Workspace | \`$WORKSPACE_PATH\` |
+          | Action | Plan |
+          | Status | $STATUS_TEXT |
+          
+          ### Resource Changes
+          - ➕ Add: $ADD_COUNT
+          - 🔄 Change: $CHANGE_COUNT
+          - ➖ Destroy: $DESTROY_COUNT
+          EOF
+          
+          # Include plan output if available
+          if [[ -f "${{ steps.workspace.outputs.path }}/plan_output.txt" ]]; then
+            cat >> $GITHUB_STEP_SUMMARY << EOF
+          
+          ### Plan Output
+          
+          <details>
+          <summary>Click to expand plan details</summary>
+          
+          \`\`\`
+          $(cat "${{ steps.workspace.outputs.path }}/plan_output.txt" | tail -100)
+          \`\`\`
+          
+          </details>
+          EOF
+          fi
+          
+          # Add error details if plan failed
+          if [[ "$PLAN_EXITCODE" == "1" ]]; then
+            cat >> $GITHUB_STEP_SUMMARY << EOF
+          
+          ### ❌ Error Details
+          
+          The Terragrunt plan failed. Please review the plan output above for details.
+          EOF
+          fi

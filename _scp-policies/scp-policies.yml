@@ -1,0 +1,168 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  RootOUID:
+    Type: String
+    Description: The ID of the AWS Organization to attach the SCPs.
+  AuditBucketArn:
+    Type: String
+    Description: The ARN of the S3 bucket for audit resources. It is possible to use arn:aws:s3:::<customer>-audit-* or arn:aws:s3:::<customer>-log-archives-*
+  BlockedRegions:
+    Type: List<String>
+    Description: The list of regions to exempt from block access. For example - ap-southeast-2,us-east-1,ap-southeast-3 
+
+Resources:
+  BlockRegionSCP:
+    Type: "AWS::Organizations::Policy"
+    Properties: 
+      Content: 
+        Version: "2012-10-17"
+        Statement: 
+          - Sid: "DenyAllOutsideAU"
+            Effect: "Deny"
+            NotAction: 
+              - "a4b:*"
+              - "acm:*"
+              - "aws-marketplace-management:*"
+              - "aws-marketplace:*"
+              - "aws-portal:*"
+              - "budgets:*"
+              - "ce:*"
+              - "chime:*"
+              - "cloudfront:*"
+              - "config:*"
+              - "cur:*"
+              - "directconnect:*"
+              - "ec2:DescribeRegions"
+              - "ec2:DescribeTransitGateways"
+              - "ec2:DescribeVpnGateways"
+              - "fms:*"
+              - "globalaccelerator:*"
+              - "health:*"
+              - "iam:*"
+              - "importexport:*"
+              - "kms:*"
+              - "mobileanalytics:*"
+              - "networkmanager:*"
+              - "organizations:*"
+              - "pricing:*"
+              - "route53:*"
+              - "route53domains:*"
+              - "s3:GetAccountPublic*"
+              - "s3:ListAllMyBuckets"
+              - "s3:PutAccountPublic*"
+              - "shield:*"
+              - "sts:*"
+              - "support:*"
+              - "trustedadvisor:*"
+              - "waf-regional:*"
+              - "waf:*"
+              - "wafv2:*"
+              - "wellarchitected:*"
+            Resource: "*"
+            Condition: 
+              StringNotEquals: 
+                "aws:RequestedRegion": 
+                  !Ref BlockedRegions
+      Description: "SCP to block access to regions outside of the specified list."
+      Name: "BlockRegionSCP"
+      Type: "SERVICE_CONTROL_POLICY"
+      TargetIds: 
+        - !Ref RootOUID
+
+  BlockAuditResourcesSCP:
+    Type: "AWS::Organizations::Policy"
+    Properties: 
+      Content: 
+        Version: "2012-10-17"
+        Statement: 
+          - Sid: "AuditS3DeleteLock"
+            Effect: "Deny"
+            Action: 
+              - "s3:DeleteObject"
+              - "s3:DeleteObjectVersion"
+            Resource: 
+              - !Ref AuditBucketArn
+          - Sid: "GuarddutyLock"
+            Effect: "Deny"
+            Action: 
+              - "guardduty:AcceptInvitation"
+              - "guardduty:ArchiveFindings"
+              - "guardduty:CreateDetector"
+              - "guardduty:CreateFilter"
+              - "guardduty:CreateIPSet"
+              - "guardduty:CreateMembers"
+              - "guardduty:CreatePublishingDestination"
+              - "guardduty:CreateSampleFindings"
+              - "guardduty:CreateThreatIntelSet"
+              - "guardduty:DeclineInvitations"
+              - "guardduty:DeleteDetector"
+              - "guardduty:DeleteFilter"
+              - "guardduty:DeleteInvitations"
+              - "guardduty:DeleteIPSet"
+              - "guardduty:DeleteMembers"
+              - "guardduty:DeletePublishingDestination"
+              - "guardduty:DeleteThreatIntelSet"
+              - "guardduty:DisassociateFromMasterAccount"
+              - "guardduty:DisassociateMembers"
+              - "guardduty:InviteMembers"
+              - "guardduty:StartMonitoringMembers"
+              - "guardduty:StopMonitoringMembers"
+              - "guardduty:TagResource"
+              - "guardduty:UnarchiveFindings"
+              - "guardduty:UntagResource"
+              - "guardduty:UpdateDetector"
+              - "guardduty:UpdateFilter"
+              - "guardduty:UpdateFindingsFeedback"
+              - "guardduty:UpdateIPSet"
+              - "guardduty:UpdatePublishingDestination"
+              - "guardduty:UpdateThreatIntelSet"
+            Resource: "*"
+          - Sid: "ConfigLock"
+            Effect: "Deny"
+            Action: 
+              - "config:DeleteConfigRule"
+              - "config:DeleteConfigurationRecorder"
+              - "config:DeleteDeliveryChannel"
+              - "config:StopConfigurationRecorder"
+            Resource: "*"
+          - Sid: "OrgLock"
+            Effect: "Deny"
+            Action: 
+              - "organizations:LeaveOrganization"
+            Resource: "*"
+          - Sid: "CloudtrailLock"
+            Effect: "Deny"
+            Action: 
+              - "cloudtrail:StopLogging"
+              - "cloudtrail:DeleteTrail"
+            Resource: "*"
+          - Sid: "DisallowCreationAccessKeyRoot"
+            Effect: "Deny"
+            Action: "iam:CreateAccessKey"
+            Resource: 
+              - "*"
+            Condition: 
+              StringLike: 
+                "aws:PrincipalArn": 
+                  - "arn:aws:iam::*:root"
+          - Sid: "BlockRootAccess"
+            Effect: "Deny"
+            Action: 
+              - "ec2:*"
+              - "lambda:*"
+              - "ecs:*"
+              - "cloudfront:*"
+              - "rds:*"
+              - "s3:*"
+              - "iam:*"
+              - "apigateway:*"
+            Resource: "*"
+            Condition: 
+              StringLike: 
+                "aws:PrincipalArn": 
+                  - "arn:aws:iam::*:root"
+      Description: "SCP to block actions on audit resources."
+      Name: "BlockAuditResourcesSCP"
+      Type: "SERVICE_CONTROL_POLICY"
+      TargetIds: 
+        - !Ref RootOUID

@@ -1,0 +1,10 @@
+.terraform
+.terraform-plan*
+.env
+.env.assume
+.env.auth
+.one
+output.json
+generated/*
+.clients
+extras-*.tf

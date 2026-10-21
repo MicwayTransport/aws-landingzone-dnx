@@ -1,0 +1,53 @@
+module "openvpn" {
+  count = try(var.openvpn.enabled, false) ? 1 : 0
+
+  source                 = "git::https://github.com/DNXLabs/terraform-aws-openvpn.git?ref=2.0.0"
+  name                   = try(var.openvpn.name, "")
+  instance_type_1        = try(var.openvpn.instance_types[0], "")
+  instance_type_2        = try(var.openvpn.instance_types[1], "")
+  instance_type_3        = try(var.openvpn.instance_types[2], "")
+  private_subnet_ids     = module.network[0].private_subnet_ids
+  public_subnet_ids      = module.network[0].public_subnet_ids
+  secure_subnet_ids      = module.network[0].secure_subnet_ids
+  vpc_id                 = module.network[0].vpc_id
+  route_push             = try(var.openvpn.route_push, "")
+  mfa                    = true
+  protocol               = "tcp"
+  domain_name            = try(var.openvpn.domain_name, "")
+  hosted_zone_id         = try(aws_route53_zone.default[var.openvpn.hosted_zone].zone_id, "")
+  nlb_security_group_ids = [aws_security_group.openvpn_nlb[0].id]
+}
+
+resource "aws_security_group" "openvpn_nlb" {
+  count       = try(var.openvpn.enabled, false) ? 1 : 0
+  name        = "${var.openvpn.name}-sg"
+  description = "SG for OpenVPN network load balancer"
+  vpc_id      = module.network[0].vpc_id
+
+  tags = {
+    Name = "${var.openvpn.name}-sg"
+  }
+}
+
+resource "aws_security_group_rule" "openvpn_nlb_from_internet" {
+  count             = try(var.openvpn.enabled, false) ? 1 : 0
+  description       = "Traffic from Internet"
+  type              = "ingress"
+  from_port         = 1194
+  to_port           = 1194
+  protocol          = "-1"
+  security_group_id = aws_security_group.openvpn_nlb[0].id
+  cidr_blocks       = try(var.openvpn.security_group.inbound.cidr_blocks, ["124.19.3.102/32", "1.158.78.110/32", "119.18.1.13/32"])
+}
+
+resource "aws_security_group_rule" "openvpn_nlb_to_internet" {
+  count             = try(var.openvpn.enabled, false) ? 1 : 0
+  description       = "Traffic to internet"
+  type              = "egress"
+  from_port         = 1194
+  to_port           = 1194
+  protocol          = "-1"
+  security_group_id = aws_security_group.openvpn_nlb[0].id
+  cidr_blocks       = try(var.openvpn.security_group.outbound.cidr_blocks, ["0.0.0.0/0"])
+}
+

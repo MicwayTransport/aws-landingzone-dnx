@@ -1,0 +1,11 @@
+services:
+  mkdocs:
+    build:
+      context: .
+      dockerfile: mkdocs.Dockerfile
+    volumes:
+      - ../:/work
+    working_dir: /work/_docs
+    command: make _build
+    environment:
+      - ENABLE_PDF_EXPORT

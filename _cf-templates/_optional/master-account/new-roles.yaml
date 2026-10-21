@@ -1,0 +1,56 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Allows DNX access to organization accounts (rev:2)"
+
+Parameters:
+  OrgName:
+    Description: Name of this organization. Use a lowercase, DNS friendly name
+    Type: String
+    AllowedPattern: "^[a-z0-9-]+$"
+  OrganizationAccountAccessRoleName:
+    Description: Name of Organization Account Access Role that DNX will be able to assume role
+    Type: String
+    Default: "OrganizationAccountAccessRole"
+
+Resources:
+  Role:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${OrgName}DNXReadOnlyAccess"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              AWS: "148642451802"
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+
+  SecurityAdminRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${OrgName}DNXSecurityAdminAccess"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              AWS: "148642451802"
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/SecurityAudit
+        - arn:aws:iam::aws:policy/job-function/NetworkAdministrator
+
+  DatabaseAdminRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${OrgName}DNXDatabaseAdminAccess"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              AWS: "148642451802"
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/job-function/DatabaseAdministrator

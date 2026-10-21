@@ -1,0 +1,55 @@
+data "aws_route53_zone" "customer_ses" {
+  count        = can(var.ses) ? 1 : 0
+  provider     = aws.automation
+  name         = try(var.ses[count.index].hosted_zone, "")
+  private_zone = false
+}
+
+resource "aws_ses_domain_identity" "mail" {
+  count    = can(var.ses) ? 1 : 0
+  provider = aws.automation
+  domain   = try(var.ses[count.index].domain, "")
+}
+
+resource "aws_ses_domain_identity_verification" "mail" {
+  count    = can(var.ses) ? 1 : 0
+  provider = aws.automation
+  domain   = try(aws_ses_domain_identity.mail[count.index].id, "")
+}
+
+resource "aws_route53_record" "ses_verification" {
+  count    = can(var.ses) ? 1 : 0
+  provider = aws.automation
+  zone_id  = data.aws_route53_zone.customer_ses[count.index].zone_id
+  name     = "_amazonses.${aws_ses_domain_identity.mail[count.index].id}"
+  type     = "TXT"
+  ttl      = "600"
+  records  = [aws_ses_domain_identity.mail[count.index].verification_token]
+}
+
+resource "aws_ses_domain_dkim" "mail" {
+  count    = can(var.ses) ? 1 : 0
+  provider = aws.automation
+  domain   = try(var.ses[count.index].domain, "")
+}
+
+resource "aws_route53_record" "dkim" {
+  count    = can(var.ses) ? 1 : 0
+  provider = aws.automation
+  zone_id  = data.aws_route53_zone.customer_ses[count.index].zone_id
+  name = format(
+    "%s._domainkey.%s",
+    element(aws_ses_domain_dkim.mail[count.index].dkim_tokens, count.index),
+    try(var.ses[count.index].domain, ""),
+  )
+  type    = "CNAME"
+  ttl     = "600"
+  records = ["${element(aws_ses_domain_dkim.mail[count.index].dkim_tokens, count.index)}.dkim.amazonses.com"]
+}
+
+resource "aws_ses_email_identity" "email" {
+  count    = can(var.ses) ? 1 : 0
+  provider = aws.automation
+  email    = try(var.ses[count.index].sender_mail, "")
+}
+

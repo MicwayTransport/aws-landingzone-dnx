@@ -1,0 +1,135 @@
+# Reusable workflow for resolving AWS account names to account IDs
+# This workflow reads accounts.json and returns the account ID along with
+# IAM role ARNs for OIDC authentication and Terragrunt operations.
+#
+
+name: Determine AWS Account
+
+on:
+  workflow_call:
+    inputs:
+      account:
+        description: 'Target AWS account name to resolve'
+        required: true
+        type: string
+    outputs:
+      account_id:
+        description: 'AWS account ID'
+        value: ${{ jobs.resolve.outputs.account_id }}
+      iam_role_arn:
+        description: 'InfraDeployGitHub role ARN for OIDC authentication'
+        value: ${{ jobs.resolve.outputs.iam_role_arn }}
+      terragrunt_role_arn:
+        description: 'InfraDeployAccess role ARN for Terragrunt operations'
+        value: ${{ jobs.resolve.outputs.terragrunt_role_arn }}
+
+jobs:
+  resolve:
+    name: Resolve Account ID
+    runs-on: ubuntu-latest
+    outputs:
+      account_id: ${{ steps.resolve.outputs.account_id }}
+      iam_role_arn: ${{ steps.resolve.outputs.iam_role_arn }}
+      terragrunt_role_arn: ${{ steps.resolve.outputs.terragrunt_role_arn }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            _workspaces/accounts.json
+          sparse-checkout-cone-mode: false
+
+      - name: Resolve account ID from accounts.json
+        id: resolve
+        shell: bash
+        run: |
+          ACCOUNT="${{ inputs.account }}"
+          ACCOUNTS_FILE="_workspaces/accounts.json"
+          
+          echo "Resolving account: $ACCOUNT"
+          
+          # Check if accounts.json exists
+          if [[ ! -f "$ACCOUNTS_FILE" ]]; then
+            echo "::error::accounts.json not found at $ACCOUNTS_FILE"
+            echo "account_id=" >> $GITHUB_OUTPUT
+            echo "iam_role_arn=" >> $GITHUB_OUTPUT
+            echo "terragrunt_role_arn=" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Read account ID from accounts.json using jq
+          ACCOUNT_ID=$(jq -r --arg account "$ACCOUNT" '.accounts[$account].account_id // empty' "$ACCOUNTS_FILE")
+          
+          # Check if account was found
+          if [[ -z "$ACCOUNT_ID" ]]; then
+            # Get list of valid accounts for error message
+            VALID_ACCOUNTS=$(jq -r '.accounts | keys | join(", ")' "$ACCOUNTS_FILE")
+            echo "::error::Unknown account: '$ACCOUNT'. Valid accounts are: $VALID_ACCOUNTS"
+            echo "account_id=" >> $GITHUB_OUTPUT
+            echo "iam_role_arn=" >> $GITHUB_OUTPUT
+            echo "terragrunt_role_arn=" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Construct IAM role ARNs
+          IAM_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/InfraDeployGitHub"
+          TERRAGRUNT_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/InfraDeployAccess"
+          
+          echo "✅ Account resolved successfully"
+          echo "   Account: $ACCOUNT"
+          echo "   Account ID: $ACCOUNT_ID"
+          echo "   IAM Role ARN: $IAM_ROLE_ARN"
+          echo "   Terragrunt Role ARN: $TERRAGRUNT_ROLE_ARN"
+          
+          # Set outputs
+          echo "account_id=$ACCOUNT_ID" >> $GITHUB_OUTPUT
+          echo "iam_role_arn=$IAM_ROLE_ARN" >> $GITHUB_OUTPUT
+          echo "terragrunt_role_arn=$TERRAGRUNT_ROLE_ARN" >> $GITHUB_OUTPUT
+
+      - name: Write resolution summary
+        if: always()
+        run: |
+          ACCOUNT="${{ inputs.account }}"
+          ACCOUNT_ID="${{ steps.resolve.outputs.account_id }}"
+          IAM_ROLE_ARN="${{ steps.resolve.outputs.iam_role_arn }}"
+          TERRAGRUNT_ROLE_ARN="${{ steps.resolve.outputs.terragrunt_role_arn }}"
+          
+          if [[ -n "$ACCOUNT_ID" ]]; then
+            STATUS_ICON="✅"
+            STATUS_TEXT="Resolved"
+            
+            cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## $STATUS_ICON Account Resolution
+          
+          | Property | Value |
+          |----------|-------|
+          | Account Name | \`$ACCOUNT\` |
+          | Account ID | \`$ACCOUNT_ID\` |
+          | Status | $STATUS_TEXT |
+          
+          ### IAM Roles
+          
+          | Role | ARN |
+          |------|-----|
+          | InfraDeployGitHub | \`$IAM_ROLE_ARN\` |
+          | InfraDeployAccess | \`$TERRAGRUNT_ROLE_ARN\` |
+          EOF
+          else
+            STATUS_ICON="❌"
+            STATUS_TEXT="Failed"
+            
+            cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## $STATUS_ICON Account Resolution
+          
+          | Property | Value |
+          |----------|-------|
+          | Account Name | \`$ACCOUNT\` |
+          | Status | $STATUS_TEXT |
+          
+          ### Error Details
+          \`\`\`
+          Unknown account: '$ACCOUNT'
+          \`\`\`
+          EOF
+          fi

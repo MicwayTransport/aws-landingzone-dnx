@@ -1,0 +1,488 @@
+# Standalone workflow for Terragrunt destroy operations
+# This workflow provides infrastructure destruction with safety confirmations
+# and GitHub environment approval gates.
+#
+# SAFETY MECHANISM: Requires confirmation input matching {account}-{region}-{stack}
+# to prevent accidental destruction.
+#
+
+name: Terragrunt Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      account:
+        description: 'Target AWS account'
+        required: true
+        type: choice
+        options:
+          - audit
+          - backup
+          - log-archive
+          - shared-services
+          - dev
+          - qa
+          - stage
+          - prod
+          - demo
+      stack:
+        description: 'Infrastructure stack to destroy'
+        required: true
+        type: choice
+        options:
+          - identity
+          - security
+          - network
+          - platform
+          - platform-data
+          - backup
+          - logs
+          - dns-delegation
+      region:
+        description: 'AWS region'
+        required: true
+        type: choice
+        default: 'ap-southeast-2'
+        options:
+          - ap-southeast-2
+          - us-east-1
+      confirmation:
+        description: 'Type "{account}-{region}-{stack}" to confirm destruction'
+        required: true
+        type: string
+      runner:
+        description: 'GitHub runner to use'
+        required: false
+        type: choice
+        default: 'ubuntu-latest'
+        options:
+          - ubuntu-latest
+          - self-hosted
+
+# Ensure only one destroy operation runs at a time per account/stack combination
+concurrency:
+  group: terragrunt-destroy-${{ github.event.inputs.account }}-${{ github.event.inputs.stack }}-${{ github.event.inputs.region }}
+  cancel-in-progress: false
+
+jobs:
+  # Step 1: Validate confirmation input 
+  validate-confirmation:
+    name: Validate Confirmation
+    runs-on: ubuntu-latest
+    outputs:
+      valid: ${{ steps.validate.outputs.valid }}
+      expected_confirmation: ${{ steps.validate.outputs.expected_confirmation }}
+    steps:
+      - name: Validate confirmation matches workspace
+        id: validate
+        run: |
+          ACCOUNT="${{ github.event.inputs.account }}"
+          REGION="${{ github.event.inputs.region }}"
+          STACK="${{ github.event.inputs.stack }}"
+          CONFIRMATION="${{ github.event.inputs.confirmation }}"
+          
+          # Expected confirmation format: {account}-{region}-{stack}
+          EXPECTED_CONFIRMATION="${ACCOUNT}-${REGION}-${STACK}"
+          
+          echo "expected_confirmation=$EXPECTED_CONFIRMATION" >> $GITHUB_OUTPUT
+          
+          echo "🔐 Validating destroy confirmation..."
+          echo "   Expected: $EXPECTED_CONFIRMATION"
+          echo "   Provided: $CONFIRMATION"
+          
+          if [[ "$CONFIRMATION" == "$EXPECTED_CONFIRMATION" ]]; then
+            echo "valid=true" >> $GITHUB_OUTPUT
+            echo "✅ Confirmation validated successfully"
+          else
+            echo "valid=false" >> $GITHUB_OUTPUT
+            echo "::error::Confirmation mismatch. Expected: '$EXPECTED_CONFIRMATION', Got: '$CONFIRMATION'"
+          fi
+
+      - name: Write validation summary
+        if: always()
+        run: |
+          ACCOUNT="${{ github.event.inputs.account }}"
+          REGION="${{ github.event.inputs.region }}"
+          STACK="${{ github.event.inputs.stack }}"
+          CONFIRMATION="${{ github.event.inputs.confirmation }}"
+          EXPECTED="${{ steps.validate.outputs.expected_confirmation }}"
+          VALID="${{ steps.validate.outputs.valid }}"
+          
+          if [[ "$VALID" == "true" ]]; then
+            STATUS_ICON="✅"
+            STATUS_TEXT="Confirmed"
+          else
+            STATUS_ICON="❌"
+            STATUS_TEXT="Mismatch"
+          fi
+          
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## $STATUS_ICON Destroy Confirmation Validation
+          
+          | Property | Value |
+          |----------|-------|
+          | Account | \`$ACCOUNT\` |
+          | Stack | \`$STACK\` |
+          | Region | \`$REGION\` |
+          | Expected Confirmation | \`$EXPECTED\` |
+          | Provided Confirmation | \`$CONFIRMATION\` |
+          | Status | $STATUS_TEXT |
+          EOF
+          
+          if [[ "$VALID" != "true" ]]; then
+            cat >> $GITHUB_STEP_SUMMARY << EOF
+          
+          ### ⚠️ Confirmation Required
+          
+          To destroy this infrastructure, you must type the exact confirmation string:
+          
+          \`\`\`
+          $EXPECTED
+          \`\`\`
+          
+          This safety mechanism prevents accidental destruction of infrastructure.
+          EOF
+          fi
+
+  # Step 2: Resolve account name to AWS account ID
+  resolve-account:
+    name: Resolve Account
+    needs: validate-confirmation
+    if: needs.validate-confirmation.outputs.valid == 'true'
+    uses: ./.github/workflows/determine_aws_account.yaml
+    with:
+      account: ${{ github.event.inputs.account }}
+
+  # Step 3: Execute Terragrunt destroy 
+  destroy:
+    name: Terragrunt Destroy
+    needs: [validate-confirmation, resolve-account]
+    if: needs.validate-confirmation.outputs.valid == 'true'
+    runs-on: ${{ github.event.inputs.runner }}
+    # GitHub environment for approval gate 
+    # Format: {account}-{stack}-destroy
+    environment: ${{ github.event.inputs.account }}-${{ github.event.inputs.stack }}-destroy
+    outputs:
+      destroy_success: ${{ steps.destroy.outputs.success }}
+      resources_destroyed: ${{ steps.destroy.outputs.resources_destroyed }}
+    
+    permissions:
+      id-token: write
+      contents: read
+    
+    env:
+      AWS_REGION: ${{ github.event.inputs.region }}
+      TF_INPUT: 'false'
+      TF_IN_AUTOMATION: 'true'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Terraform & Terragrunt
+        run: |
+          # Install Terraform
+          TERRAFORM_VERSION="1.14.4"
+          wget -qO /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+          unzip -q /tmp/terraform.zip -d /tmp/
+          sudo mv /tmp/terraform /usr/local/bin/
+          sudo chmod +x /usr/local/bin/terraform
+          
+          # Install Terragrunt
+          TERRAGRUNT_VERSION="0.55.0"
+          wget -qO /tmp/terragrunt "https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}/terragrunt_linux_amd64"
+          sudo mv /tmp/terragrunt /usr/local/bin/terragrunt
+          sudo chmod +x /usr/local/bin/terragrunt
+          
+          terraform --version
+          terragrunt --version
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ needs.resolve-account.outputs.account_id }}:role/InfraDeployGitHub
+          role-session-name: github-actions-terragrunt-destroy
+          aws-region: ${{ github.event.inputs.region }}
+
+      - name: Setup Terraform provider cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.terraform.d/plugin-cache
+            .terragrunt-cache
+          key: ${{ runner.os }}-terraform-${{ github.event.inputs.account }}-${{ github.event.inputs.stack }}-${{ hashFiles('**/*.tf', '**/*.hcl') }}
+          restore-keys: |
+            ${{ runner.os }}-terraform-${{ github.event.inputs.account }}-${{ github.event.inputs.stack }}-
+            ${{ runner.os }}-terraform-${{ github.event.inputs.account }}-
+            ${{ runner.os }}-terraform-
+
+      - name: Configure Terraform plugin cache
+        run: |
+          mkdir -p ~/.terraform.d/plugin-cache
+          echo 'plugin_cache_dir = "$HOME/.terraform.d/plugin-cache"' > ~/.terraformrc
+
+      - name: Construct workspace path
+        id: workspace
+        run: |
+          WORKSPACE_PATH="_workspaces/${{ github.event.inputs.account }}/${{ github.event.inputs.region }}/${{ github.event.inputs.stack }}"
+          echo "path=$WORKSPACE_PATH" >> $GITHUB_OUTPUT
+          echo "📁 Workspace path: $WORKSPACE_PATH"
+          
+          # Verify workspace exists
+          if [[ ! -d "$WORKSPACE_PATH" ]]; then
+            echo "::error::Workspace directory not found: $WORKSPACE_PATH"
+            exit 1
+          fi
+
+      - name: Terragrunt init
+        id: init
+        shell: bash
+        working-directory: ${{ steps.workspace.outputs.path }}
+        run: |
+          echo "🔧 Initializing Terragrunt..."
+          terragrunt init \
+            --terragrunt-iam-role "arn:aws:iam::${{ needs.resolve-account.outputs.account_id }}:role/InfraDeployAccess" \
+            --terragrunt-non-interactive \
+            -no-color 2>&1 | tee init_output.txt
+          
+          INIT_EXIT_CODE=${PIPESTATUS[0]}
+          if [[ $INIT_EXIT_CODE -ne 0 ]]; then
+            echo "::error::Terragrunt init failed with exit code $INIT_EXIT_CODE"
+            exit $INIT_EXIT_CODE
+          fi
+          echo "✅ Terragrunt init completed successfully"
+
+      - name: Terragrunt destroy
+        id: destroy
+        shell: bash
+        working-directory: ${{ steps.workspace.outputs.path }}
+        run: |
+          echo "🗑️ Running Terragrunt destroy..."
+          echo "⚠️ WARNING: This will destroy all resources in the workspace!"
+          echo ""
+          
+          # Run destroy with auto-approve
+          set +e
+          terragrunt destroy \
+            --terragrunt-iam-role "arn:aws:iam::${{ needs.resolve-account.outputs.account_id }}:role/InfraDeployAccess" \
+            --terragrunt-non-interactive \
+            -auto-approve \
+            -no-color 2>&1 | tee destroy_output.txt
+          
+          DESTROY_EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          
+          if [[ $DESTROY_EXIT_CODE -eq 0 ]]; then
+            echo "success=true" >> $GITHUB_OUTPUT
+            echo "✅ Terragrunt destroy completed successfully"
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+            echo "::error::Terragrunt destroy failed with exit code $DESTROY_EXIT_CODE"
+            exit $DESTROY_EXIT_CODE
+          fi
+          
+          # Parse resource counts from destroy output
+          # Look for "Destroy complete! Resources: X destroyed."
+          RESOURCES_LINE=$(grep -oP 'Destroy complete! Resources: \d+ destroyed' destroy_output.txt || echo "")
+          
+          if [[ -n "$RESOURCES_LINE" ]]; then
+            DESTROY_COUNT=$(echo "$RESOURCES_LINE" | grep -oP '\d+ destroyed' | grep -oP '\d+' || echo "0")
+          else
+            DESTROY_COUNT=0
+          fi
+          
+          echo "resources_destroyed=$DESTROY_COUNT" >> $GITHUB_OUTPUT
+          
+          echo ""
+          echo "📊 Destruction Summary:"
+          echo "   🗑️ Resources Destroyed: $DESTROY_COUNT"
+
+      - name: Write destroy summary
+        if: always()
+        run: |
+          ACCOUNT="${{ github.event.inputs.account }}"
+          STACK="${{ github.event.inputs.stack }}"
+          REGION="${{ github.event.inputs.region }}"
+          WORKSPACE_PATH="${{ steps.workspace.outputs.path }}"
+          DESTROY_SUCCESS="${{ steps.destroy.outputs.success }}"
+          RESOURCES_DESTROYED="${{ steps.destroy.outputs.resources_destroyed }}"
+          ENVIRONMENT="${{ github.event.inputs.account }}-${{ github.event.inputs.stack }}-destroy"
+          CONFIRMATION="${{ github.event.inputs.confirmation }}"
+          
+          # Determine status
+          if [[ "$DESTROY_SUCCESS" == "true" ]]; then
+            STATUS_ICON="✅"
+            STATUS_TEXT="Success"
+          else
+            STATUS_ICON="❌"
+            STATUS_TEXT="Failed"
+          fi
+          
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## $STATUS_ICON Terragrunt Destroy Summary
+          
+          | Property | Value |
+          |----------|-------|
+          | Account | \`$ACCOUNT\` |
+          | Stack | \`$STACK\` |
+          | Region | \`$REGION\` |
+          | Workspace | \`$WORKSPACE_PATH\` |
+          | Environment | \`$ENVIRONMENT\` |
+          | Confirmation | \`$CONFIRMATION\` |
+          | Action | Destroy |
+          | Status | $STATUS_TEXT |
+          
+          ### Resource Changes
+          - ➖ Destroy: ${RESOURCES_DESTROYED:-0}
+          EOF
+          
+          # Include destroy output if available
+          if [[ -f "${{ steps.workspace.outputs.path }}/destroy_output.txt" ]]; then
+            cat >> $GITHUB_STEP_SUMMARY << EOF
+          
+          ### Destroy Output
+          
+          <details>
+          <summary>Click to expand destroy details</summary>
+          
+          \`\`\`
+          $(cat "${{ steps.workspace.outputs.path }}/destroy_output.txt" | tail -100)
+          \`\`\`
+          
+          </details>
+          EOF
+          fi
+          
+          # Add error details if destroy failed
+          if [[ "$DESTROY_SUCCESS" != "true" ]]; then
+            cat >> $GITHUB_STEP_SUMMARY << EOF
+          
+          ### ❌ Error Details
+          
+          The Terragrunt destroy failed. Please review the destroy output above for details.
+          
+          **Troubleshooting Steps:**
+          1. Check the destroy output for specific error messages
+          2. Verify AWS credentials and permissions
+          3. Ensure the workspace configuration is correct
+          4. Review any resource dependencies or state issues
+          5. Check for resources with deletion protection enabled
+          EOF
+          fi
+
+  # Handle confirmation failure
+  confirmation-failed:
+    name: Confirmation Failed
+    needs: validate-confirmation
+    if: needs.validate-confirmation.outputs.valid != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report confirmation failure
+        run: |
+          EXPECTED="${{ needs.validate-confirmation.outputs.expected_confirmation }}"
+          PROVIDED="${{ github.event.inputs.confirmation }}"
+          
+          echo "::error::Confirmation mismatch. Expected: '$EXPECTED', Got: '$PROVIDED'"
+          
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## ❌ Destroy Aborted - Confirmation Mismatch
+          
+          | Property | Value |
+          |----------|-------|
+          | Account | \`${{ github.event.inputs.account }}\` |
+          | Stack | \`${{ github.event.inputs.stack }}\` |
+          | Region | \`${{ github.event.inputs.region }}\` |
+          | Action | Destroy |
+          | Status | Aborted |
+          
+          ### Confirmation Error
+          
+          | Field | Value |
+          |-------|-------|
+          | Expected | \`$EXPECTED\` |
+          | Provided | \`$PROVIDED\` |
+          
+          ### ⚠️ Safety Mechanism
+          
+          The destroy operation was **aborted** because the confirmation string did not match.
+          
+          To destroy this infrastructure, you must type the exact confirmation string:
+          
+          \`\`\`
+          $EXPECTED
+          \`\`\`
+          
+          This safety mechanism prevents accidental destruction of infrastructure.
+          EOF
+          
+          exit 1
+
+  # Summary job to provide final status
+  summary:
+    name: Workflow Summary
+    needs: [validate-confirmation, resolve-account, destroy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate workflow summary
+        run: |
+          ACCOUNT="${{ github.event.inputs.account }}"
+          STACK="${{ github.event.inputs.stack }}"
+          REGION="${{ github.event.inputs.region }}"
+          RUNNER="${{ github.event.inputs.runner }}"
+          CONFIRMATION="${{ github.event.inputs.confirmation }}"
+          
+          VALID="${{ needs.validate-confirmation.outputs.valid }}"
+          EXPECTED="${{ needs.validate-confirmation.outputs.expected_confirmation }}"
+          ACCOUNT_ID="${{ needs.resolve-account.outputs.account_id }}"
+          DESTROY_SUCCESS="${{ needs.destroy.outputs.destroy_success }}"
+          RESOURCES_DESTROYED="${{ needs.destroy.outputs.resources_destroyed }}"
+          
+          # Determine overall status
+          if [[ "$VALID" != "true" ]]; then
+            STATUS_ICON="❌"
+            STATUS_TEXT="Aborted - Confirmation Mismatch"
+          elif [[ "$DESTROY_SUCCESS" == "true" ]]; then
+            STATUS_ICON="✅"
+            STATUS_TEXT="Success"
+          else
+            STATUS_ICON="❌"
+            STATUS_TEXT="Failed"
+          fi
+          
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## $STATUS_ICON Terragrunt Destroy Workflow Summary
+          
+          | Property | Value |
+          |----------|-------|
+          | Account | \`$ACCOUNT\` |
+          | Account ID | \`${ACCOUNT_ID:-N/A}\` |
+          | Stack | \`$STACK\` |
+          | Region | \`$REGION\` |
+          | Action | Destroy |
+          | Runner | $RUNNER |
+          | Status | $STATUS_TEXT |
+          
+          ### Confirmation Details
+          
+          | Field | Value |
+          |-------|-------|
+          | Expected | \`$EXPECTED\` |
+          | Provided | \`$CONFIRMATION\` |
+          | Valid | $VALID |
+          
+          ### Workflow Run Details
+          
+          - **Workflow Run ID**: \`${{ github.run_id }}\`
+          - **Triggered By**: ${{ github.actor }}
+          - **Timestamp**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          EOF
+          
+          # Add destroy results if applicable
+          if [[ "$VALID" == "true" ]]; then
+            cat >> $GITHUB_STEP_SUMMARY << EOF
+          
+          ### Resource Changes
+          - ➖ Destroy: ${RESOURCES_DESTROYED:-0}
+          EOF
+          fi

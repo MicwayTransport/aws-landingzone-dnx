@@ -1,0 +1,169 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Billing IAM Roles and Budgets [Region required: us-east-1] (rev:2)"
+
+Parameters:
+  SAMLProviderArn:
+    Description: ARN of SAML Provider to use. This creates IAM role 'BillingAccess'.
+    Type: String
+    Default: ""
+  SAMLProviderDocument:
+    Description: SAML Provider XML Document. Use when XML is < 4096 characters. This creates the SAML Provider and IAM roles 'InfraDeploy' and 'BillingAccess'.
+    Type: String
+    Default: ""
+  DNX:
+    Description: Allows DNX access to billing
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+  OrgName:
+    Description: Name of your organization for the purpose of using in resource naming
+    Type: String
+  BudgetEnabled:
+    Description: Enables Budget Alarms
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+  BudgetAmount:
+    Description: Budget amount to alarm (in USD)
+    Type: Number
+    Default: 1000
+  BudgetThreshold:
+    Description: Threshold of budget to alarm (in percent)
+    Type: Number
+    Default: 80
+  BudgetEmail:
+    Description: Email to alarm when budget is exceeded or cost anomaly is detected
+    Type: String
+    Default: ""
+  CostAnomaly:
+    Description: Enables anomaly detection on cost
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+  CostAnomalyThreshold:
+    Description: Alert when an anomaly detected is greater than this threshold (in USD) - A good number would be 20% of your expected monthly amount
+    Type: Number
+    Default: 200
+
+Conditions:
+  isSSO: !Not [!And [ !Equals [!Ref SAMLProviderDocument, ""], !Equals [!Ref SAMLProviderArn, ""] ] ]
+  isCreateIdentityProvider: !Not [!Equals [!Ref SAMLProviderDocument, ""] ]
+  isDNX: !Equals [!Ref DNX, "true"]
+  isBudget: !Equals [!Ref BudgetEnabled, "true"]
+  isCostAnomaly: !Equals [!Ref CostAnomaly, "true"]
+
+Resources:
+  IAMRoleDNXBillingAccess:
+    Condition: isDNX
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${OrgName}DNXBillingAccess"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/job-function/Billing
+        - !Ref IAMPolicyBillingExtras
+      MaxSessionDuration: 43200
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              AWS: "148642451802"
+            Action: "sts:AssumeRole"
+
+  IAMIdentityProvider:
+    Condition: isCreateIdentityProvider
+    Type: AWS::IAM::SAMLProvider
+    Properties: 
+      Name: !Sub "${OrgName}-sso"
+      SamlMetadataDocument: !Ref SAMLProviderDocument
+
+  IAMRoleBillingAccess:
+    Condition: isSSO
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "BillingAccess"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/job-function/Billing
+        - !Ref IAMPolicyBillingExtras
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [isCreateIdentityProvider, !Ref IAMIdentityProvider, !Ref SAMLProviderArn]
+            Action: 'sts:AssumeRoleWithSAML'
+            Condition:
+              StringEquals:
+                'saml:aud': 'https://signin.aws.amazon.com/saml'
+
+  IAMPolicyBillingExtras:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      ManagedPolicyName: "BillingExtras"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "ce:*"
+              - "cur:*"
+              - "budgets:*"
+            Resource: "*"
+
+  Budget:
+    Type: "AWS::Budgets::Budget"
+    Condition: isBudget
+    Properties:
+      Budget:
+        BudgetLimit:
+          Amount: !Ref BudgetAmount
+          Unit: USD
+        TimeUnit: MONTHLY
+        BudgetType: COST
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: !Ref BudgetThreshold
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetEmail
+
+  AnomalyServiceMonitor:
+    Condition: isCostAnomaly
+    Type: "AWS::CE::AnomalyMonitor"
+    Properties:
+      MonitorName: !Sub "${OrgName}-Service-Monitor"
+      MonitorType: 'DIMENSIONAL'
+      MonitorDimension: 'SERVICE'
+
+  AnomalyDefaultSubscription:
+    Condition: isCostAnomaly
+    Type: "AWS::CE::AnomalySubscription"
+    Properties:
+      SubscriptionName: !Sub "${OrgName}-Default-Subscription"
+      Threshold: !Ref CostAnomalyThreshold
+      Frequency: "DAILY"
+      MonitorArnList:
+        - !Ref AnomalyServiceMonitor
+      Subscribers: 
+        - Type: EMAIL
+          Address: !Ref BudgetEmail
+
+Outputs:
+  IAMRoleBillingAccessArn:
+    Description: BillingAccess IAM Role ARN (to use for SSO)
+    Value: !GetAtt IAMRoleBillingAccess.Arn
+    Condition: isSSO
+  IAMIdentityProviderArn:
+    Description: IdentityProvider ARN
+    Value: !If [isCreateIdentityProvider, !Ref IAMIdentityProvider, !Ref SAMLProviderArn]
+    Condition: isSSO

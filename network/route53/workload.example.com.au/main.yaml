@@ -1,0 +1,11 @@
+records:
+  - name: "test.workload.example.com.au"
+    type: CNAME
+    records: ["something.workload.example.com.au"] 
+
+  - name: "example.com.au"
+    type: A
+    alias:
+      name: "dualstack.alb.ap-southeast-2.elb.amazonaws.com."
+      zone_id: "Z1GM333333333"
+      evaluate_target_health: false

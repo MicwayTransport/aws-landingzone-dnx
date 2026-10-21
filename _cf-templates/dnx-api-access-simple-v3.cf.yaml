@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Allows DNX API access with externalID to accounts using readonly policies (rev:3)"
+
+Parameters:
+  OrgName:
+    Description: Name of this organization. Use a lowercase, DNS friendly name
+    Type: String
+    AllowedPattern: "^[a-z0-9-]+$"
+  ExternalID:
+    Description: Enter the external ID provided
+    Type: String
+
+Resources:
+  Role:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${OrgName}DNXReadOnlyAPIAccess"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              AWS: "148642451802"
+            Action: "sts:AssumeRole"
+            Condition:
+              StringEquals:
+                "sts:ExternalId": !Ref ExternalID
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DenyDynamoDBDataAccess
+                Effect: Deny
+                Action:
+                  - 'dynamodb:Query'
+                  - 'dynamodb:Scan'
+                  - 'dynamodb:BatchGetItem'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PartiQLSelect'
+                Resource: '*'
+              - Sid: DenyElastiCacheDataAccess
+                Effect: Deny
+                Action:
+                  - 'elasticache:BatchApplyUpdateAction'
+                  - 'elasticache:BatchStopUpdateAction'
+                Resource: '*'
+              - Sid: DenyTimestreamQueries
+                Effect: Deny
+                Action:
+                  - 'timestream:Select'
+                  - 'timestream:SelectValues'
+                Resource: '*'
+              - Sid: DenyAthenaQueries
+                Effect: Deny
+                Action:
+                  - 'athena:GetQueryExecution'
+                  - 'athena:GetQueryResults'
+                  - 'athena:GetWorkGroup'
+                  - 'athena:StartQueryExecution'
+                  - 'athena:StopQueryExecution'
+                Resource: '*'
+              - Sid: DenyKMSDecrypt
+                Effect: Deny
+                Action:
+                  - 'kms:Decrypt'
+                Resource: '*'
+              - Sid: DenySecretsManagerValues
+                Effect: Deny
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                  - 'secretsmanager:BatchGetSecretValue'
+                Resource: '*'
+              - Sid: DenyS3ObjectAccess
+                Effect: Deny
+                Action:
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:GetObjectVersionTagging'
+                  - 's3:GetObjectVersionTorrent'
+                  - 's3:GetObjectAcl'
+                  - 's3:GetObjectVersionAcl'
+                  - 's3:GetObjectTorrent'
+                  - 's3:GetObjectRetention'
+                  - 's3:GetObjectLegalHold'
+                Resource: '*'
+              - Sid: DenyAdditionalSensitiveDataAccess
+                Effect: Deny
+                Action:
+                  - 'codecommit:GitPull'
+                  - 'codecommit:GetFile'
+                  - 'codecommit:GetFolder'
+                  - 'codecommit:GetBlob'
+                Resource: '*'
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+        - arn:aws:iam::aws:policy/job-function/ViewOnlyAccess
+
+Outputs:
+  RoleName:
+    Description: "Name of the created IAM role"
+    Value: !Ref Role
+  RoleArn:
+    Description: "ARN of the created IAM role"
+    Value: !GetAtt Role.Arn

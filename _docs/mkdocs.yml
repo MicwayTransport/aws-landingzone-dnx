@@ -1,0 +1,88 @@
+site_name: DNX Foundation
+site_url: http://127.0.0.1:8000/
+nav:
+  - Overview: 'index.md'
+  - Architecture:
+    - Accounts: 'Architecture.Accounts.md'
+    - Networking: 'Architecture.Networking.md'
+    - Transit Gateway: 'Architecture.TransitGateway.md'
+    - DNS: 'Architecture.Dns.md'
+    - ACM Certificates: 'Architecture.Acm.md'
+    - Logs: 'Architecture.Logs.md'
+    - Security: 'Architecture.Security.md'
+    - Secrets: 'Architecture.Secrets.md'
+    - VPN: 'Architecture.Vpn.md'
+    - ECS: 'Architecture.Ecs.md if stacks.platform.workspaces.items() | map("last") | map(attribute="ecs", default={}) | selectattr("clusters") | list | length > 0'
+    - EKS: 'Architecture.Eks.md if stacks.platform.workspaces.items() | map("last") | map(attribute="eks", default={}) | selectattr("enabled") | list | length > 0'
+    - Billing: 'Architecture.Billing.md'
+    - Audit: 'Architecture.Audit.md'
+    - Monitoring: 'Architecture.Monitoring.md'
+    - Backup: 'Architecture.Backup.md'
+    - KMS: 'Architecture.Kms.md'
+  - Stacks:
+    - Overview: 'Stacks.md'
+    - Security: 'Stacks.Audit.md'
+    - Identity: 'Stacks.Identity.md'
+    - Platform: 'Stacks.Platform.md'
+    - Kubernetes: 'Stacks.Kubernetes.md if stacks.platform.workspaces.items() | map("last") | map(attribute="eks", default={}) | selectattr("enabled") | list | length > 0'
+    - Network: 'Stacks.Network.md'
+  - Compliance:
+    - Compliance: 'Compliance.md'
+  - Playbooks:
+    - ECS App: 'Playbooks.EcsApp.md'
+    - Workload Account: 'Playbooks.WorkloadAccount.md'
+  - FAQ:
+    - FAQ: 'FAQ.md'
+
+use_directory_urls: false
+theme:
+  name: material
+extra_css:
+  - css/extra.css
+  - css/pdf-print.css
+plugins:
+  - search
+  - macros
+  # - pdf-export:
+  #     combined: true
+  - with-pdf:
+      #author: WHO
+      #copyright: ANY TEXT
+      #
+      #cover: false
+      #back_cover: true
+      #cover_title: TITLE TEXT
+      cover_subtitle: !ENV [CLIENT, '']
+      #custom_template_path: TEMPLATES PATH
+      #
+      #toc_title: TOC TITLE TEXT
+      #heading_shift: false
+      #toc_level: 3
+      #ordered_chapter_level: 2
+      #excludes_children:
+      #    - 'release-notes/:upgrading'
+      #    - 'release-notes/:changelog'
+      #
+      #exclude_pages:
+      #    - 'bugs/'
+      #    - 'appendix/contribute/'
+      #convert_iframe:
+      #    - src: IFRAME SRC
+      #      img: POSTER IMAGE URL
+      #      text: ALTERNATE TEXT
+      #    - src: ...
+      #two_columns_level: 3
+      #
+      #render_js: true
+      #headless_chrome_path: headless-chromium
+      #
+      output_path: ../docs.pdf
+      enabled_if_env: ENABLE_PDF_EXPORT
+      #
+      #debug_html: true
+      #show_anchors: true
+      #verbose: true
+  - print-site:
+      print_page_title: 'DNX Foundation'
+      add_to_navigation: true
+      toc_depth: 5

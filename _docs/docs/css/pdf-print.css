@@ -1,0 +1,46 @@
+/* 
+** for PDF Printing
+*/ 
+/* fixed for `base.css` of mkdocs v1.0.4 */
+/* code, pre code {
+  font-family: Menlo,Monaco,Consolas,"Courier New",monospace !important;
+}
+*/
+
+@media print {
+  hr {
+    display: none;
+  }
+  p {
+    font-size: inherit;
+  }
+}
+
+@page {
+  size: a4 portrait;
+  margin: 25mm 10mm 25mm 10mm;
+  counter-increment: page;
+  font-family: "Roboto","Helvetica Neue",Helvetica,Arial,sans-serif;
+  white-space: pre;
+  color: grey;
+  /* @top-left {
+      content: '© 2018 My Company';
+  } */
+  @top-center {
+      content: string(chapter);
+  }
+  /* @top-right {
+      content: 'Page ' counter(page);
+  } */
+}
+
+@media print {
+  /* This is to avoid long tables to be truncated */
+  .md-typeset table:not([class]) {
+      display: block;
+  }
+  img {
+    height: auto;
+    max-width: 150mm !important;
+  }
+}

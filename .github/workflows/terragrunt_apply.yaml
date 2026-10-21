@@ -1,0 +1,266 @@
+# Reusable workflow for executing Terragrunt apply operations
+# This workflow runs terragrunt apply in the specified workspace with
+# GitHub environment approval gates for production accounts.
+#
+
+name: Terragrunt Apply
+
+on:
+  workflow_call:
+    inputs:
+      account:
+        description: 'Target AWS account name'
+        required: true
+        type: string
+      account_id:
+        description: 'AWS account ID'
+        required: true
+        type: string
+      stack:
+        description: 'Infrastructure stack to deploy'
+        required: true
+        type: string
+      region:
+        description: 'AWS region'
+        required: true
+        type: string
+      runner:
+        description: 'GitHub runner to use'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+    outputs:
+      apply_success:
+        description: 'Whether the apply was successful'
+        value: ${{ jobs.apply.outputs.apply_success }}
+      resources_modified:
+        description: 'Number of resources modified'
+        value: ${{ jobs.apply.outputs.resources_modified }}
+
+env:
+  AWS_REGION: ${{ inputs.region }}
+  TF_INPUT: 'false'
+  TF_IN_AUTOMATION: 'true'
+
+jobs:
+  apply:
+    name: Terragrunt Apply
+    runs-on: ${{ inputs.runner }}
+    # GitHub environment for approval gates
+    # Format: {account}-{stack}-apply (Requirement 6.5)
+    environment: ${{ inputs.account }}-${{ inputs.stack }}-apply
+    outputs:
+      apply_success: ${{ steps.apply.outputs.success }}
+      resources_modified: ${{ steps.apply.outputs.resources_modified }}
+    
+    permissions:
+      id-token: write
+      contents: read
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Terraform & Terragrunt
+        run: |
+          # Install Terraform
+          TERRAFORM_VERSION="1.14.4"
+          wget -qO /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+          unzip -q /tmp/terraform.zip -d /tmp/
+          sudo mv /tmp/terraform /usr/local/bin/
+          sudo chmod +x /usr/local/bin/terraform
+          
+          # Install Terragrunt
+          TERRAGRUNT_VERSION="0.55.0"
+          wget -qO /tmp/terragrunt "https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}/terragrunt_linux_amd64"
+          sudo mv /tmp/terragrunt /usr/local/bin/terragrunt
+          sudo chmod +x /usr/local/bin/terragrunt
+          
+          terraform --version
+          terragrunt --version
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ inputs.account_id }}:role/InfraDeployGitHub
+          role-session-name: github-actions-terragrunt-apply
+          aws-region: ${{ inputs.region }}
+
+      - name: Setup Terraform provider cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.terraform.d/plugin-cache
+            .terragrunt-cache
+          key: ${{ runner.os }}-terraform-${{ inputs.account }}-${{ inputs.stack }}-${{ hashFiles('**/*.tf', '**/*.hcl') }}
+          restore-keys: |
+            ${{ runner.os }}-terraform-${{ inputs.account }}-${{ inputs.stack }}-
+            ${{ runner.os }}-terraform-${{ inputs.account }}-
+            ${{ runner.os }}-terraform-
+
+      - name: Configure Terraform plugin cache
+        run: |
+          mkdir -p ~/.terraform.d/plugin-cache
+          echo 'plugin_cache_dir = "$HOME/.terraform.d/plugin-cache"' > ~/.terraformrc
+
+      - name: Construct workspace path
+        id: workspace
+        run: |
+          WORKSPACE_PATH="_workspaces/${{ inputs.account }}/${{ inputs.region }}/${{ inputs.stack }}"
+          echo "path=$WORKSPACE_PATH" >> $GITHUB_OUTPUT
+          echo "📁 Workspace path: $WORKSPACE_PATH"
+          
+          # Verify workspace exists
+          if [[ ! -d "$WORKSPACE_PATH" ]]; then
+            echo "::error::Workspace directory not found: $WORKSPACE_PATH"
+            exit 1
+          fi
+
+      - name: Terragrunt init
+        id: init
+        shell: bash
+        working-directory: ${{ steps.workspace.outputs.path }}
+        run: |
+          echo "🔧 Initializing Terragrunt..."
+          terragrunt init \
+            --terragrunt-iam-role "arn:aws:iam::${{ inputs.account_id }}:role/InfraDeployAccess" \
+            --terragrunt-non-interactive \
+            -no-color 2>&1 | tee init_output.txt
+          
+          INIT_EXIT_CODE=${PIPESTATUS[0]}
+          if [[ $INIT_EXIT_CODE -ne 0 ]]; then
+            echo "::error::Terragrunt init failed with exit code $INIT_EXIT_CODE"
+            exit $INIT_EXIT_CODE
+          fi
+          echo "✅ Terragrunt init completed successfully"
+
+      - name: Terragrunt apply
+        id: apply
+        shell: bash
+        working-directory: ${{ steps.workspace.outputs.path }}
+        run: |
+          echo "🚀 Running Terragrunt apply..."
+          
+          # Run apply with auto-approve (Requirement 6.2)
+          set +e
+          terragrunt apply \
+            --terragrunt-iam-role "arn:aws:iam::${{ inputs.account_id }}:role/InfraDeployAccess" \
+            --terragrunt-non-interactive \
+            -auto-approve \
+            -no-color 2>&1 | tee apply_output.txt
+          
+          APPLY_EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          
+          if [[ $APPLY_EXIT_CODE -eq 0 ]]; then
+            echo "success=true" >> $GITHUB_OUTPUT
+            echo "✅ Terragrunt apply completed successfully"
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+            echo "::error::Terragrunt apply failed with exit code $APPLY_EXIT_CODE"
+            exit $APPLY_EXIT_CODE
+          fi
+          
+          # Parse resource counts from apply output
+          # Look for "Apply complete! Resources: X added, Y changed, Z destroyed."
+          RESOURCES_LINE=$(grep -oP 'Apply complete! Resources: \d+ added, \d+ changed, \d+ destroyed' apply_output.txt || echo "")
+          
+          if [[ -n "$RESOURCES_LINE" ]]; then
+            ADD_COUNT=$(echo "$RESOURCES_LINE" | grep -oP '\d+ added' | grep -oP '\d+' || echo "0")
+            CHANGE_COUNT=$(echo "$RESOURCES_LINE" | grep -oP '\d+ changed' | grep -oP '\d+' || echo "0")
+            DESTROY_COUNT=$(echo "$RESOURCES_LINE" | grep -oP '\d+ destroyed' | grep -oP '\d+' || echo "0")
+            TOTAL_MODIFIED=$((ADD_COUNT + CHANGE_COUNT + DESTROY_COUNT))
+          else
+            ADD_COUNT=0
+            CHANGE_COUNT=0
+            DESTROY_COUNT=0
+            TOTAL_MODIFIED=0
+          fi
+          
+          echo "resources_modified=$TOTAL_MODIFIED" >> $GITHUB_OUTPUT
+          echo "add_count=$ADD_COUNT" >> $GITHUB_OUTPUT
+          echo "change_count=$CHANGE_COUNT" >> $GITHUB_OUTPUT
+          echo "destroy_count=$DESTROY_COUNT" >> $GITHUB_OUTPUT
+          
+          echo ""
+          echo "📊 Resources Modified Summary:"
+          echo "   ➕ Added: $ADD_COUNT"
+          echo "   🔄 Changed: $CHANGE_COUNT"
+          echo "   ➖ Destroyed: $DESTROY_COUNT"
+          echo "   📦 Total: $TOTAL_MODIFIED"
+
+      - name: Write apply summary
+        if: always()
+        run: |
+          ACCOUNT="${{ inputs.account }}"
+          STACK="${{ inputs.stack }}"
+          REGION="${{ inputs.region }}"
+          WORKSPACE_PATH="${{ steps.workspace.outputs.path }}"
+          APPLY_SUCCESS="${{ steps.apply.outputs.success }}"
+          RESOURCES_MODIFIED="${{ steps.apply.outputs.resources_modified }}"
+          ADD_COUNT="${{ steps.apply.outputs.add_count }}"
+          CHANGE_COUNT="${{ steps.apply.outputs.change_count }}"
+          DESTROY_COUNT="${{ steps.apply.outputs.destroy_count }}"
+          ENVIRONMENT="${{ inputs.account }}-${{ inputs.stack }}-apply"
+          
+          # Determine status
+          if [[ "$APPLY_SUCCESS" == "true" ]]; then
+            STATUS_ICON="✅"
+            STATUS_TEXT="Success"
+          else
+            STATUS_ICON="❌"
+            STATUS_TEXT="Failed"
+          fi
+          
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## $STATUS_ICON Terragrunt Apply Summary
+          
+          | Property | Value |
+          |----------|-------|
+          | Account | \`$ACCOUNT\` |
+          | Stack | \`$STACK\` |
+          | Region | \`$REGION\` |
+          | Workspace | \`$WORKSPACE_PATH\` |
+          | Environment | \`$ENVIRONMENT\` |
+          | Action | Apply |
+          | Status | $STATUS_TEXT |
+          
+          ### Resource Changes
+          - ➕ Add: ${ADD_COUNT:-0}
+          - 🔄 Change: ${CHANGE_COUNT:-0}
+          - ➖ Destroy: ${DESTROY_COUNT:-0}
+          - 📦 **Total Modified**: ${RESOURCES_MODIFIED:-0}
+          EOF
+          
+          # Include apply output if available (Requirement 8.4)
+          if [[ -f "${{ steps.workspace.outputs.path }}/apply_output.txt" ]]; then
+            cat >> $GITHUB_STEP_SUMMARY << EOF
+          
+          ### Apply Output
+          
+          <details>
+          <summary>Click to expand apply details</summary>
+          
+          \`\`\`
+          $(cat "${{ steps.workspace.outputs.path }}/apply_output.txt" | tail -100)
+          \`\`\`
+          
+          </details>
+          EOF
+          fi
+          
+          # Add error details if apply failed
+          if [[ "$APPLY_SUCCESS" != "true" ]]; then
+            cat >> $GITHUB_STEP_SUMMARY << EOF
+          
+          ### ❌ Error Details
+          
+          The Terragrunt apply failed. Please review the apply output above for details.
+          
+          **Troubleshooting Steps:**
+          1. Check the apply output for specific error messages
+          2. Verify AWS credentials and permissions
+          3. Ensure the workspace configuration is correct
+          4. Review any resource conflicts or state issues
+          EOF
+          fi

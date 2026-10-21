@@ -1,0 +1,36 @@
+{
+  "accounts": {
+    "root": {
+      "account_id": "111111111111",
+      "name": "root"
+    },
+    "audit": {
+      "account_id": "222222222222",
+      "name": "audit"
+    },
+    "log-archive": {
+      "account_id": "333333333333",
+      "name": "log-archive"
+    },
+    "backup": {
+      "account_id": "444444444444",
+      "name": "backup"
+    },
+    "shared-services": {
+      "account_id": "555555555555",
+      "name": "shared-services"
+    },
+    "dev": {
+      "account_id": "666666666666",
+      "name": "dev"
+    },
+    "stage": {
+      "account_id": "777777777777",
+      "name": "stage"
+    },
+    "prod": {
+      "account_id": "888888888888",
+      "name": "prod"
+    }
+  }
+}

@@ -1,0 +1,257 @@
+# Main orchestrator workflow for Terragrunt infrastructure deployments
+# This workflow provides the entry point for all infrastructure operations,
+# orchestrating validation, account resolution, and plan/apply execution.
+#
+
+name: Terragrunt Infrastructure Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      account:
+        description: 'Target AWS account'
+        required: true
+        type: choice
+        options:
+          - audit
+          - backup
+          - log-archive
+          - shared-services
+          - dev
+          - qa
+          - stage
+          - prod
+          - demo
+      stack:
+        description: 'Infrastructure stack to deploy'
+        required: true
+        type: choice
+        options:
+          - identity
+          - security
+          - network
+          - platform
+          - platform-data
+          - backup
+          - logs
+          - dns-delegation
+      region:
+        description: 'AWS region'
+        required: true
+        type: choice
+        default: 'ap-southeast-2'
+        options:
+          - ap-southeast-2
+          - us-east-1
+      action:
+        description: 'Action to perform'
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+      runner:
+        description: 'GitHub runner to use'
+        required: false
+        type: choice
+        default: 'ubuntu-latest'
+        options:
+          - ubuntu-latest
+          - self-hosted
+
+# Ensure only one deployment runs at a time per account/stack combination
+concurrency:
+  group: terragrunt-${{ github.event.inputs.account }}-${{ github.event.inputs.stack }}-${{ github.event.inputs.region }}
+  cancel-in-progress: false
+
+jobs:
+  # Step 1: Validate the account/stack combination (Requirement 1.2)
+  validate:
+    name: Validate Inputs
+    uses: ./.github/workflows/validate_inputs.yaml
+    with:
+      account: ${{ github.event.inputs.account }}
+      stack: ${{ github.event.inputs.stack }}
+
+  # Step 2: Resolve account name to AWS account ID (Requirement 1.3)
+  resolve-account:
+    name: Resolve Account
+    needs: validate
+    if: needs.validate.outputs.valid == 'true'
+    uses: ./.github/workflows/determine_aws_account.yaml
+    with:
+      account: ${{ github.event.inputs.account }}
+
+  # Step 3a: Execute Terragrunt plan if action is 'plan' (Requirement 1.3)
+  plan:
+    name: Terragrunt Plan
+    needs: [validate, resolve-account]
+    if: |
+      needs.validate.outputs.valid == 'true' && 
+      github.event.inputs.action == 'plan'
+    uses: ./.github/workflows/terragrunt_plan.yaml
+    with:
+      account: ${{ github.event.inputs.account }}
+      account_id: ${{ needs.resolve-account.outputs.account_id }}
+      stack: ${{ github.event.inputs.stack }}
+      region: ${{ github.event.inputs.region }}
+      runner: ${{ github.event.inputs.runner }}
+    permissions:
+      id-token: write
+      contents: read
+
+  # Step 3b: Execute Terragrunt apply if action is 'apply' (Requirement 1.3)
+  apply:
+    name: Terragrunt Apply
+    needs: [validate, resolve-account]
+    if: |
+      needs.validate.outputs.valid == 'true' && 
+      github.event.inputs.action == 'apply'
+    uses: ./.github/workflows/terragrunt_apply.yaml
+    with:
+      account: ${{ github.event.inputs.account }}
+      account_id: ${{ needs.resolve-account.outputs.account_id }}
+      stack: ${{ github.event.inputs.stack }}
+      region: ${{ github.event.inputs.region }}
+      runner: ${{ github.event.inputs.runner }}
+    permissions:
+      id-token: write
+      contents: read
+
+  # Handle validation failure (Requirement 1.4)
+  validation-failed:
+    name: Validation Failed
+    needs: validate
+    if: needs.validate.outputs.valid != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report validation failure
+        run: |
+          echo "::error::Validation failed: ${{ needs.validate.outputs.error_message }}"
+          
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## ❌ Workflow Failed - Invalid Input Combination
+          
+          | Property | Value |
+          |----------|-------|
+          | Account | \`${{ github.event.inputs.account }}\` |
+          | Stack | \`${{ github.event.inputs.stack }}\` |
+          | Region | \`${{ github.event.inputs.region }}\` |
+          | Action | ${{ github.event.inputs.action }} |
+          | Status | Failed |
+          
+          ### Error Details
+          
+          \`\`\`
+          ${{ needs.validate.outputs.error_message }}
+          \`\`\`
+          
+          ### Valid Stack Combinations
+          
+          | Account | Valid Stacks |
+          |---------|--------------|
+          | audit | identity, security |
+          | backup | backup, identity, security |
+          | log-archive | identity, logs, security |
+          | shared-services | dns-delegation, identity, network, security |
+          | dev, qa, stage, prod, demo | backup, identity, network, platform, platform-data, security |
+          EOF
+          
+          exit 1
+
+  # Summary job to provide final status
+  summary:
+    name: Workflow Summary
+    needs: [validate, resolve-account, plan, apply]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate workflow summary
+        run: |
+          ACCOUNT="${{ github.event.inputs.account }}"
+          STACK="${{ github.event.inputs.stack }}"
+          REGION="${{ github.event.inputs.region }}"
+          ACTION="${{ github.event.inputs.action }}"
+          RUNNER="${{ github.event.inputs.runner }}"
+          
+          VALIDATE_RESULT="${{ needs.validate.outputs.valid }}"
+          ACCOUNT_ID="${{ needs.resolve-account.outputs.account_id }}"
+          
+          # Determine overall status
+          if [[ "$VALIDATE_RESULT" != "true" ]]; then
+            STATUS_ICON="❌"
+            STATUS_TEXT="Failed - Invalid Inputs"
+          elif [[ "$ACTION" == "plan" ]]; then
+            PLAN_EXITCODE="${{ needs.plan.outputs.plan_exitcode }}"
+            case "$PLAN_EXITCODE" in
+              0)
+                STATUS_ICON="✅"
+                STATUS_TEXT="Success - No Changes"
+                ;;
+              2)
+                STATUS_ICON="📝"
+                STATUS_TEXT="Success - Changes Detected"
+                ;;
+              *)
+                STATUS_ICON="❌"
+                STATUS_TEXT="Failed"
+                ;;
+            esac
+          elif [[ "$ACTION" == "apply" ]]; then
+            APPLY_SUCCESS="${{ needs.apply.outputs.apply_success }}"
+            if [[ "$APPLY_SUCCESS" == "true" ]]; then
+              STATUS_ICON="✅"
+              STATUS_TEXT="Success"
+            else
+              STATUS_ICON="❌"
+              STATUS_TEXT="Failed"
+            fi
+          else
+            STATUS_ICON="⚠️"
+            STATUS_TEXT="Unknown"
+          fi
+          
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## $STATUS_ICON Terragrunt Workflow Summary
+          
+          | Property | Value |
+          |----------|-------|
+          | Account | \`$ACCOUNT\` |
+          | Account ID | \`${ACCOUNT_ID:-N/A}\` |
+          | Stack | \`$STACK\` |
+          | Region | \`$REGION\` |
+          | Action | $ACTION |
+          | Runner | $RUNNER |
+          | Status | $STATUS_TEXT |
+          
+          ### Workflow Run Details
+          
+          - **Workflow Run ID**: \`${{ github.run_id }}\`
+          - **Triggered By**: ${{ github.actor }}
+          - **Timestamp**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          EOF
+          
+          # Add action-specific details
+          if [[ "$ACTION" == "plan" && "$VALIDATE_RESULT" == "true" ]]; then
+            cat >> $GITHUB_STEP_SUMMARY << EOF
+          
+          ### Plan Results
+          
+          | Metric | Count |
+          |--------|-------|
+          | ➕ Add | ${{ needs.plan.outputs.add_count }} |
+          | 🔄 Change | ${{ needs.plan.outputs.change_count }} |
+          | ➖ Destroy | ${{ needs.plan.outputs.destroy_count }} |
+          EOF
+          fi
+          
+          if [[ "$ACTION" == "apply" && "$VALIDATE_RESULT" == "true" ]]; then
+            cat >> $GITHUB_STEP_SUMMARY << EOF
+          
+          ### Apply Results
+          
+          | Metric | Value |
+          |--------|-------|
+          | Resources Modified | ${{ needs.apply.outputs.resources_modified }} |
+          EOF
+          fi

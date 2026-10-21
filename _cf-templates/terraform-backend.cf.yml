@@ -1,0 +1,109 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: "Terraform Backend S3 Bucket (rev:citadel5)"
+
+#====================================================================================================
+Parameters:
+#====================================================================================================
+  OrgName:
+    Type: String
+    Description: Name of Organization to use as bucket prefix
+  NameSuffix:
+    Type: String
+    Description: An optional suffix to append to the bucket name
+    Default: ""
+  RoleARNs:
+    Type: CommaDelimitedList
+    Description: List or Role ARNs to allow writing to the bucket. Usually arn:aws:iam::<account_id>:role/InfraDeployAccess of all member accounts
+  KMSKeyARN:
+    Type: String
+    Description: KMS Key ID or ARN to encrypt objects (leave it blank to use S3 default master key)
+  CitadelAutomation:
+    Description: Allows Citadel Automation access to this S3 Bucket
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+
+Conditions:
+  HasCustomKMS: !Not [!Equals [!Ref KMSKeyARN, ""]]
+  HasNameSuffix: !Not [!Equals [!Ref NameSuffix, ""]]
+  HasRoleARNs: !Not [!Equals [!Join ["", !Ref RoleARNs], ""]]
+  isCitadelAutomation: !Equals [!Ref CitadelAutomation, "true"]
+
+#====================================================================================================
+Resources:
+#====================================================================================================
+  S3Bucket:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !If
+        - HasNameSuffix
+        - !Sub "${OrgName}-terraform-backend-${NameSuffix}"
+        - !Sub "${OrgName}-terraform-backend"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !If [HasCustomKMS, !Ref KMSKeyARN, !Ref AWS::NoValue]
+            BucketKeyEnabled: true
+  S3BucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Statement:
+          - Action:
+              - 's3:GetObject'
+              - 's3:PutObject'
+            Effect: Allow
+            Resource: !Sub 'arn:aws:s3:::${S3Bucket}/*'
+            Principal:
+              AWS: !GetAtt IAMRoleTerraformBackendAccess.Arn
+          - Action:
+              - 's3:ListBucket'
+            Effect: Allow
+            Resource: !Sub 'arn:aws:s3:::${S3Bucket}'
+            Principal:
+              AWS: !GetAtt IAMRoleTerraformBackendAccess.Arn
+
+  IAMRoleTerraformBackendAccess:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "TerraformBackendAccess"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Split
+                  - ","
+                  - !Join
+                    - ","
+                    - - !Sub "arn:aws:iam::${AWS::AccountId}:role/InfraDeployAccess"
+                      - !If [ isCitadelAutomation, "arn:aws:iam::953027019050:role/InfraDeploy", !Ref "AWS::NoValue" ]
+                      - !If [HasRoleARNs, !Join [",", !Ref RoleARNs], !Ref AWS::NoValue]
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: s3-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                Effect: Allow
+                Resource: !Sub 'arn:aws:s3:::${S3Bucket}/*'
+              - Action:
+                  - 's3:ListBucket'
+                Effect: Allow
+                Resource: !Sub 'arn:aws:s3:::${S3Bucket}'

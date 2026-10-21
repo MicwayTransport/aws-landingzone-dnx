@@ -1,0 +1,156 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Allows DNX access to organisation accounts (rev:1)"
+
+Parameters:
+  OrgName:
+    Description: Name of this organization. Use a lowercase, DNS friendly name
+    Type: String
+    AllowedPattern: "^[a-z0-9-]+$"
+  Admin:
+    Description: Enable full admin rights
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  AccountCreationPolicy:
+    Description: Enable light policy to build foundations accounts (use this when admin is not possible)
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  CFDeploy:
+    Description: Creates an IAM Role to allow deploying DNX access to defined subaccounts
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  OrganizationAccountAccessRoleName:
+    Description: Name of Organization Account Access Role that DNX will be able to assume role
+    Type: String
+    Default: "OrganizationAccountAccessRole"
+
+Conditions:
+  isAdmin: !Equals [!Ref Admin, "true"]
+  isCFDeploy: !Equals [!Ref CFDeploy, "true"]
+  isAccountCreation: !Equals [!Ref AccountCreationPolicy, "true"]
+
+Resources:
+  Role:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${OrgName}DNXAccess"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              AWS: "148642451802"
+            Action: "sts:AssumeRole"
+  RolePolicyAdmin:
+    Condition: isAdmin
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "admin"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action: "*"
+            Resource: "*"
+      Roles:
+        - !Ref "Role"
+  RolePolicyInfraDeploy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "infra-deploy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action: "sts:AssumeRole"
+            Resource:
+              - "arn:aws:iam::*:role/terraform-backend"
+              - "arn:aws:iam::*:role/InfraDeployAccess"
+              - "arn:aws:iam::*:role/CIDeployAccess"
+              - "arn:aws:iam::*:role/CloudFormationInfraDeploy"
+          - Effect: "Allow"
+            Action:
+              - "organizations:Describe*"
+              - "organizations:List*"
+              - "sts:Get*"
+            Resource: "*"
+      Roles:
+        - !Ref "Role"
+  RolePolicyAccountCreation:
+    Condition: isAccountCreation
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "account-creation"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "organizations:Describe*"
+              - "organizations:List*"
+              - "organizations:CreateAccount"
+              - "organizations:CreateOrganization"
+              - "organizations:CreateOrganizationalUnit"
+              - "organizations:UpdateOrganizationalUnit"
+              - "organizations:MoveAccount"
+              - "organizations:TagResource"
+              - "organizations:UntagResource"
+              - "sts:Get*"
+              - "cloudformation:CreateStackSet"
+              - "cloudformation:CreateStackInstances"
+            Resource: "*"
+          - Effect: "Allow"
+            Action:
+              - "sts:AssumeRole"
+            Resource: !Sub "arn:aws:iam::*:role/${OrganizationAccountAccessRoleName}"
+      Roles:
+        - !Ref "Role"
+  RolePolicyCFDeploy:
+    Condition: isCFDeploy
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "passrole-cfdeploy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "iam:PassRole"
+            Resource: !GetAtt CFDeployRole.Arn
+      Roles:
+        - !Ref "Role"
+  CFDeployRole:
+    Condition: isCFDeploy
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "CloudFormationInfraDeploy"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: 
+                - cloudformation.amazonaws.com
+            Action: "sts:AssumeRole"
+  CFDeployRolePolicyInfraDeploy:
+    Condition: isCFDeploy
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "infra-deploy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action: "sts:AssumeRole"
+            Resource:
+              - "arn:aws:iam::*:role/InfraDeployAccess"
+      Roles:
+        - !Ref "CFDeployRole"
