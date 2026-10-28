@@ -1,0 +1,88 @@
+name: Deploy
+run-name: Deploy - ${{ inputs.account }} - ${{ inputs.region }} - ${{ inputs.stack }} - ${{ inputs.mode }}
+
+permissions:
+  id-token: write
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      account:
+        description: 'AWS account (folder in _workspaces/)'
+        required: true
+        type: choice
+        options:
+          - audit
+          - backup
+          - log-archive
+          - shared-services
+          - dev
+          - stage
+          - prod
+          - secure-prod
+      stack:
+        description: 'Stack to deploy (folder in _workspaces/<account>/<region>/)'
+        required: true
+        type: choice
+        options:
+          - identity
+          - security
+          - network
+          - platform
+          - platform-data
+          - backup
+          - logs
+          - dns-delegation
+      region:
+        description: 'AWS region (folder in _workspaces/<account>/)'
+        required: true
+        type: choice
+        default: 'ap-southeast-2'
+        options:
+          - ap-southeast-2
+          - us-east-1
+      mode:
+        description: 'Mode (apply = plan first, then waits for Environment approval)'
+        required: true
+        default: 'plan'
+        type: choice
+        options:
+          - plan
+          - apply
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply only from the default branch
+        env:
+          MODE: ${{ inputs.mode }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$MODE" = "apply" ] && [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo "::error::apply is only allowed from '$DEFAULT_BRANCH' (current ref: $GITHUB_REF). Run it from '$DEFAULT_BRANCH' or use mode=plan."
+            exit 1
+          fi
+
+  plan:
+    name: Terragrunt Plan
+    needs: preflight
+    uses: ./.github/workflows/terragrunt_plan.yaml
+    with:
+      account: ${{ inputs.account }}
+      stack: ${{ inputs.stack }}
+      region: ${{ inputs.region }}
+
+  apply:
+    name: Terragrunt Apply
+    needs: [preflight, plan]
+    # Runs only when the plan has changes. The Environment
+    # "<account>-<stack>-apply" holds the job until a reviewer approves it.
+    if: ${{ inputs.mode == 'apply' && needs.plan.outputs.has_changes == 'true' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    uses: ./.github/workflows/terragrunt_apply.yaml
+    with:
+      account: ${{ inputs.account }}
+      stack: ${{ inputs.stack }}
+      region: ${{ inputs.region }}

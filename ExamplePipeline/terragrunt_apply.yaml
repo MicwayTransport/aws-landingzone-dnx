@@ -1,0 +1,120 @@
+name: Terragrunt Apply
+
+on:
+  workflow_call:
+    inputs:
+      account:
+        description: 'AWS account name (folder in _workspaces/, e.g. dev, prod, shared-services)'
+        required: true
+        type: string
+      stack:
+        description: 'Stack in _workspaces/<account>/<region>/<stack>'
+        required: true
+        type: string
+      region:
+        description: 'AWS region (folder in _workspaces/<account>/, e.g. ap-southeast-2)'
+        required: true
+        type: string
+      deploy-role-name:
+        description: 'Role assumed via OIDC by GitHub Actions'
+        required: false
+        type: string
+        default: InfraDeployGitHub
+      access-role-name:
+        description: 'Role used by Terragrunt (--terragrunt-iam-role)'
+        required: false
+        type: string
+        default: InfraDeployAccess
+      terraform-version:
+        required: false
+        type: string
+        default: '1.9.5'
+      terragrunt-version:
+        required: false
+        type: string
+        default: '0.62.2'
+
+# Read from repository (or organization) Actions variables:
+#   vars.AWS_ACCOUNT_IDS  JSON map of account name -> 12-digit account ID, e.g.
+#                         {"dev":"111111111111","prod":"222222222222"}
+# IMPORTANT: this job runs with -auto-approve. It uses the GitHub Environment
+# "<account>-<stack>-apply". Configure "Required reviewers" (and deployment
+# branches = default branch) on that Environment so a human approves every apply.
+# Note: GitHub creates an Environment without protection rules the first time a
+# workflow references it, so create and protect them BEFORE the first run.
+
+jobs:
+  terragrunt_apply:
+    name: Apply ${{ inputs.account }}/${{ inputs.region }}/${{ inputs.stack }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.account }}-${{ inputs.stack }}-apply
+    concurrency:
+      group: terragrunt-apply-${{ inputs.account }}-${{ inputs.region }}-${{ inputs.stack }}
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      ACCOUNT: ${{ inputs.account }}
+      STACK: ${{ inputs.stack }}
+      REGION: ${{ inputs.region }}
+      ACCESS_ROLE_NAME: ${{ inputs.access-role-name }}
+      TG_VERSION: ${{ inputs.terragrunt-version }}
+      AWS_ACCOUNT_IDS: ${{ vars.AWS_ACCOUNT_IDS }}
+      TF_INPUT: 'false'
+      TF_IN_AUTOMATION: 'true'
+    steps:
+      - name: Validate inputs and resolve account ID
+        id: account
+        shell: bash
+        run: |
+          [[ "$ACCOUNT" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || { echo "::error::invalid account"; exit 1; }
+          [[ "$STACK" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || { echo "::error::invalid stack"; exit 1; }
+          [[ "$REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]] || { echo "::error::invalid region"; exit 1; }
+          [ -n "$AWS_ACCOUNT_IDS" ] || { echo "::error::Define the Actions variable AWS_ACCOUNT_IDS (JSON map of account name to account ID)"; exit 1; }
+          id=$(jq -r --arg a "$ACCOUNT" '.[$a] // empty' <<< "$AWS_ACCOUNT_IDS")
+          [[ "$id" =~ ^[0-9]{12}$ ]] || { echo "::error::AWS_ACCOUNT_IDS has no valid 12-digit ID for account '$ACCOUNT'"; exit 1; }
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "AWS_ACCOUNT_ID=$id" >> "$GITHUB_ENV"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check workspace directory
+        run: test -d "_workspaces/$ACCOUNT/$REGION/$STACK" || { echo "::error::_workspaces/$ACCOUNT/$REGION/$STACK does not exist"; exit 1; }
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - name: Set up Terragrunt (checksum verified)
+        run: |
+          base="https://github.com/gruntwork-io/terragrunt/releases/download/v${TG_VERSION}"
+          curl -fsSL -o terragrunt_linux_amd64 "$base/terragrunt_linux_amd64"
+          curl -fsSL -o SHA256SUMS "$base/SHA256SUMS"
+          grep " terragrunt_linux_amd64$" SHA256SUMS | sha256sum -c -
+          sudo install -m 0755 terragrunt_linux_amd64 /usr/local/bin/terragrunt
+          rm -f terragrunt_linux_amd64 SHA256SUMS
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ steps.account.outputs.id }}:role/${{ inputs.deploy-role-name }}
+          role-session-name: github-actions
+          role-duration-seconds: 1800
+          aws-region: ${{ inputs.region }}
+
+      - name: Terragrunt apply
+        shell: bash
+        working-directory: _workspaces/${{ inputs.account }}/${{ inputs.region }}/${{ inputs.stack }}
+        run: |
+          terragrunt apply -auto-approve -no-color --terragrunt-non-interactive \
+            --terragrunt-iam-role "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${ACCESS_ROLE_NAME}" 2>&1 | tee apply_output.txt
+          {
+            echo "### Apply: ${ACCOUNT}/${REGION}/${STACK}"
+            echo '```'
+            tail -n 100 apply_output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
